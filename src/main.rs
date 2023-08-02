@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{cell::RefCell, fmt::Display, rc::Rc};
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{
@@ -45,30 +45,37 @@ pub enum Op {
 #[derive(Debug, Clone)]
 pub struct BinOp {
     pub op: Op,
-    pub lhs: Box<Spanned<Expr>>,
-    pub rhs: Box<Spanned<Expr>>,
+    pub lhs: Box<Spanned<Term>>,
+    pub rhs: Box<Spanned<Term>>,
 }
 
 /// A function. This is a function that takes arguments.
 #[derive(Debug, Clone)]
 pub enum Function {
     Pow {
-        base: Box<Spanned<Expr>>,
-        exp: Box<Spanned<Expr>>,
+        base: Box<Spanned<Term>>,
+        exp: Box<Spanned<Term>>,
     },
-    Sqrt(Box<Spanned<Expr>>),
-    Cbrt(Box<Spanned<Expr>>),
-    Factorial(Box<Spanned<Expr>>),
+    Sqrt(Box<Spanned<Term>>),
+    Cbrt(Box<Spanned<Term>>),
+    Factorial(Box<Spanned<Term>>),
+}
+
+/// A variable. This is a variable that can be assigned to.
+#[derive(Default, Debug, Clone)]
+pub struct Variable {
+    pub data: Rc<RefCell<Term>>,
 }
 
 /// A term in the calculator. This is the lowest level of the calculator.
-#[derive(Debug, Clone)]
-pub enum Expr {
+#[derive(Default, Debug, Clone)]
+pub enum Term {
+    #[default]
     Error,
     Number(usize),
     Decimal(usize, usize),
-    Group(Box<Spanned<Expr>>),
-    Identifier(String),
+    Group(Box<Spanned<Term>>),
+    Variable(String, Variable),
     BinOp(BinOp),
     Apply(Function),
 }
@@ -86,8 +93,8 @@ pub enum EqKind {
 #[derive(Debug, Clone)]
 pub struct Equation {
     pub kind: EqKind,
-    pub lhs: Spanned<Expr>,
-    pub rhs: Spanned<Expr>,
+    pub lhs: Spanned<Term>,
+    pub rhs: Spanned<Term>,
 }
 
 //// The span type used by the parser.
@@ -173,9 +180,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         // Defines the parser for the value. It is the base of the
         // expression parser.
         let value = select! {
-            Token::Number(number) => Expr::Number(number),
-            Token::Decimal(int, decimal) => Expr::Decimal(int, decimal),
-            Token::Identifier(identifier) => Expr::Identifier(identifier.into()),
+            Token::Number(number) => Term::Number(number),
+            Token::Decimal(int, decimal) => Term::Decimal(int, decimal),
+            Token::Identifier(identifier) => Term::Variable(identifier.into(), Variable::default()),
         }
         .labelled("value");
 
@@ -185,17 +192,17 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
             .or(expr
                 .clone()
                 .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-                .map(|expr| Expr::Group(Box::new(expr))))
+                .map(|expr| Term::Group(Box::new(expr))))
             .or(expr
                 .clone()
                 .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
                 .boxed()
-                .map(|expr| Expr::Group(Box::new(expr))))
+                .map(|expr| Term::Group(Box::new(expr))))
             .or(expr
                 .clone()
                 .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
                 .boxed()
-                .map(|expr| Expr::Group(Box::new(expr))))
+                .map(|expr| Term::Group(Box::new(expr))))
             .map_with_span(|expr, span| (expr, span))
             .recover_with(via_parser(nested_delimiters(
                 Token::Ctrl('('),
@@ -204,7 +211,7 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     (Token::Ctrl('['), Token::Ctrl(']')),
                     (Token::Ctrl('{'), Token::Ctrl('}')),
                 ],
-                |span| (Expr::Error, span),
+                |span| (Term::Error, span),
             )))
             .labelled("primary");
 
@@ -212,7 +219,7 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
             .clone()
             .then(just(Token::Identifier("!")).or_not())
             .map(|(expr, not)| match not {
-                Some(_) => Expr::Apply(Function::Factorial(expr.into())),
+                Some(_) => Term::Apply(Function::Factorial(expr.into())),
                 None => expr.0,
             })
             .map_with_span(|expr, span| (expr, span))
@@ -226,9 +233,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     .or(just(Token::Identifier("-")).to(Op::Sub))
                     .then(expr.clone())
                     .repeated(),
-                |lhs: Spanned<Expr>, (op, rhs)| {
+                |lhs: Spanned<Term>, (op, rhs)| {
                     let span = SimpleSpan::new(lhs.1.start, rhs.1.end);
-                    let expr = Expr::BinOp(BinOp {
+                    let expr = Term::BinOp(BinOp {
                         op,
                         lhs: lhs.into(),
                         rhs: rhs.into(),
@@ -246,9 +253,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     .or(just(Token::Identifier("/")).to(Op::Div))
                     .then(expr.clone())
                     .repeated(),
-                |lhs: Spanned<Expr>, (op, rhs)| {
+                |lhs: Spanned<Term>, (op, rhs)| {
                     let span = SimpleSpan::new(lhs.1.start, rhs.1.end);
-                    let expr = Expr::BinOp(BinOp {
+                    let expr = Term::BinOp(BinOp {
                         op,
                         lhs: lhs.into(),
                         rhs: rhs.into(),
@@ -282,13 +289,17 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 fn parse(s: &str) -> Spanned<Equation> {
     type AriadneSpan = (String, std::ops::Range<usize>);
 
-    let filename = "test".to_string();
+    // Defines the filename of the source. And it is used to
+    // create the report.
+    let filename = "terminal".to_string();
+
     let (tokens, lex_errors) = lexer().parse(s).into_output_errors();
     let tokens = tokens.unwrap_or_default();
     let (expr, errors) = parser()
         .parse(tokens.as_slice().spanned((s.len()..s.len()).into()))
         .into_output_errors();
 
+    // If there are no errors, return the parsed expression.
     if !errors.is_empty() || !lex_errors.is_empty() {
         errors
             .into_iter()
@@ -318,16 +329,23 @@ fn parse(s: &str) -> Spanned<Equation> {
             });
     }
 
+    // If the expression is not present, we return an error sentinel
+    // value to avoid crashing.
     expr.unwrap_or_else(|| {
         let span: Span = (s.len()..s.len()).into();
         let equation = Equation {
             kind: EqKind::Eq,
-            lhs: (Expr::Error, span),
-            rhs: (Expr::Error, span),
+            lhs: (Term::Error, span),
+            rhs: (Term::Error, span),
         };
         (equation, span)
     })
 }
+
+/// Unifies two terms. It's the main point of the equation.
+///
+/// The logic relies here.
+pub fn unify(term: Term, another: Term) {}
 
 fn main() {
     println!("{:?}", parse("1 + 2 * 3 = x"));
