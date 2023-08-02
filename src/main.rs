@@ -136,10 +136,13 @@ fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, Lexer
         .at_least(1)
         .map_slice(Token::Identifier);
 
+    let ident = text::ident().map(Token::Identifier);
+
     let ctrl = one_of("()[]{}").map(Token::Ctrl);
 
     num.or(op)
         .or(ctrl)
+        .or(ident)
         .map_with_span(|token, span| (token, span))
         .padded()
         .repeated()
@@ -275,6 +278,8 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 ///
 /// [`Equation`]: [`Equation`]
 fn parse(s: &str) -> Spanned<Equation> {
+    type AriadneSpan = (String, std::ops::Range<usize>);
+
     let filename = "test".to_string();
     let (tokens, lex_errors) = lexer().parse(s).into_output_errors();
     let tokens = tokens.unwrap_or_default();
@@ -283,8 +288,6 @@ fn parse(s: &str) -> Spanned<Equation> {
         .into_output_errors();
 
     if !errors.is_empty() || !lex_errors.is_empty() {
-        type AriadneSpan = (String, std::ops::Range<usize>);
-
         errors
             .into_iter()
             .map(|error| error.map_token(|c| c.to_string()))
@@ -325,5 +328,5 @@ fn parse(s: &str) -> Spanned<Equation> {
 }
 
 fn main() {
-    println!("{:?}", parse("(1 + 2) * 3 -= x + 4"));
+    println!("{:?}", parse("1 + 2 * 3 = x"));
 }
