@@ -74,7 +74,7 @@ pub enum Expr {
 }
 
 /// The kind of equation. This is used to determine the kind of comparison to perform.
-/// 
+///
 /// It can be an equality or inequality.
 #[derive(Debug, Clone, Copy)]
 pub enum EqKind {
@@ -277,40 +277,54 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 fn parse(s: &str) -> Spanned<Equation> {
     let filename = "test".to_string();
     let (tokens, lex_errors) = lexer().parse(s).into_output_errors();
-    let tokens = tokens.unwrap();
+    let tokens = tokens.unwrap_or_default();
     let (expr, errors) = parser()
         .parse(tokens.as_slice().spanned((s.len()..s.len()).into()))
         .into_output_errors();
 
-    if !errors.is_empty() || !lex_errors.is_empty() {
-        type AriadneSpan = (String, std::ops::Range<usize>);
-
-        Report::<AriadneSpan>::build(ReportKind::Error, filename.clone(), 0)
-            .with_code(1)
-            .with_message("parse error")
-            .with_labels(
-                errors
-                    .into_iter()
-                    .map(|error| error.map_token(|c| c.to_string()))
-                    .chain(
-                        lex_errors
-                            .into_iter()
-                            .map(|error| error.map_token(|token| token.to_string())),
-                    )
-                    .map(|error| {
-                        Label::new((filename.clone(), error.span().into_range()))
-                            .with_message(error.reason().to_string())
-                            .with_color(Color::Red)
-                    }),
-            )
-            .finish()
-            .eprint((filename.to_string(), Source::from(s.to_string())))
-            .unwrap();
+    if let Some(expr) = expr {
+        return expr;
     }
 
-    expr.unwrap()
+    type AriadneSpan = (String, std::ops::Range<usize>);
+
+    errors
+        .into_iter()
+        .map(|error| error.map_token(|c| c.to_string()))
+        .chain(
+            lex_errors
+                .into_iter()
+                .map(|error| error.map_token(|token| token.to_string())),
+        )
+        .for_each(|error| {
+            Report::<AriadneSpan>::build(ReportKind::Error, filename.clone(), 0)
+                .with_code(1)
+                .with_message(error.to_string())
+                .with_label(
+                    Label::new((filename.clone(), error.span().into_range()))
+                        .with_message(error.reason().to_string())
+                        .with_color(Color::Red),
+                )
+                .with_labels(error.contexts().map(|(label, span)| {
+                    Label::new((filename.clone(), span.into_range()))
+                        .with_message(format!("while parsing this {}", label))
+                        .with_color(Color::Yellow)
+                }))
+                .finish()
+                .eprint((filename.to_string(), Source::from(s.to_string())))
+                .unwrap();
+        });
+
+    // Return the sentinel value
+    let span: Span = (s.len()..s.len()).into();
+    let equation = Equation {
+        kind: EqKind::Eq,
+        lhs: (Expr::Error, span),
+        rhs: (Expr::Error, span),
+    };
+    (equation, span)
 }
 
 fn main() {
-    println!("{:?}", parse("(1 + 2) * 3 = 7"));
+    println!("{:?}", parse("(1 + 2) * 3 -= x + 4"));
 }
