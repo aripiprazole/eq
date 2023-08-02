@@ -129,16 +129,18 @@ fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, Lexer
             };
 
             Ok(Token::Decimal(int, decimal))
-        });
+        })
+        .labelled("number");
 
     let op = one_of("+*-/!^|&<>=")
         .repeated()
         .at_least(1)
-        .map_slice(Token::Identifier);
+        .map_slice(Token::Identifier)
+        .labelled("operator");
 
-    let ident = text::ident().map(Token::Identifier);
+    let ident = text::ident().map(Token::Identifier).labelled("icognito");
 
-    let ctrl = one_of("()[]{}").map(Token::Ctrl);
+    let ctrl = one_of("()[]{}").map(Token::Ctrl).labelled("ctrl");
 
     num.or(op)
         .or(ctrl)
