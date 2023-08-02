@@ -68,8 +68,15 @@ pub enum Expr {
     Apply(Function),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum EqKind {
+    Neq,
+    Eq,
+}
+
 #[derive(Debug, Clone)]
 pub struct Equation {
+    pub kind: EqKind,
     pub lhs: Spanned<Expr>,
     pub rhs: Spanned<Expr>,
 }
@@ -219,9 +226,13 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 
     expr_parser
         .clone()
-        .then_ignore(just(Token::Identifier("=")))
+        .then(
+            just(Token::Identifier("="))
+                .to(EqKind::Eq)
+                .or(just(Token::Identifier("!=")).to(EqKind::Neq)),
+        )
         .then(expr_parser.clone())
-        .map(|(lhs, rhs)| Equation { lhs, rhs })
+        .map(|((lhs, op), rhs)| Equation { kind: op, lhs, rhs })
         .map_with_span(|equation, span| (equation, span))
         .labelled("equation")
 }
@@ -264,5 +275,5 @@ fn parse(s: &str) -> Spanned<Equation> {
 }
 
 fn main() {
-    println!("{:?}", parse("1 + 2 * 3 = 7"));
+    println!("{:?}", parse("(1 + 2) * 3 = 7"));
 }
