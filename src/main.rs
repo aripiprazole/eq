@@ -12,6 +12,7 @@ use chumsky::{
     text, IterParser, Parser,
 };
 
+/// The token type used by the lexer.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Token<'src> {
     Number(usize),
@@ -31,6 +32,7 @@ impl<'src> Display for Token<'src> {
     }
 }
 
+/// An operator. This is a binary operation that takes two arguments.
 #[derive(Debug, Clone, Copy)]
 pub enum Op {
     Add,
@@ -39,6 +41,7 @@ pub enum Op {
     Div,
 }
 
+/// A binary operation. This is a binary operation that takes two arguments.
 #[derive(Debug, Clone)]
 pub struct BinOp {
     pub op: Op,
@@ -46,6 +49,7 @@ pub struct BinOp {
     pub rhs: Box<Spanned<Expr>>,
 }
 
+/// A function. This is a function that takes arguments.
 #[derive(Debug, Clone)]
 pub enum Function {
     Pow {
@@ -57,6 +61,7 @@ pub enum Function {
     Factorial(Box<Spanned<Expr>>),
 }
 
+/// A term in the calculator. This is the lowest level of the calculator.
 #[derive(Debug, Clone)]
 pub enum Expr {
     Error,
@@ -68,12 +73,16 @@ pub enum Expr {
     Apply(Function),
 }
 
+/// The kind of equation. This is used to determine the kind of comparison to perform.
+/// 
+/// It can be an equality or inequality.
 #[derive(Debug, Clone, Copy)]
 pub enum EqKind {
     Neq,
     Eq,
 }
 
+/// An equation. This is the top-level type of the calculator.
 #[derive(Debug, Clone)]
 pub struct Equation {
     pub kind: EqKind,
@@ -81,15 +90,23 @@ pub struct Equation {
     pub rhs: Spanned<Expr>,
 }
 
+//// The span type used by the parser.
 type Span = SimpleSpan;
 
+/// The input type for the parser.
 type ParserInput<'tokens, 'src> =
     chumsky::input::SpannedInput<Token<'src>, Span, &'tokens [(Token<'src>, Span)]>;
 
+/// A lexer error.
 type LexerError<'src> = Err<Rich<'src, char, Span>>;
 
+/// A spanned value. A value that has a source code span attached to it.
 type Spanned<T> = (T, Span);
 
+/// Parse a string into a set of tokens.
+///
+/// This function is a wrapper around the lexer and parser, and is the main entry point
+/// for the calculator.
 fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, LexerError<'src>> {
     let num = text::int(10)
         .then(just('.').then(text::int(10)).or_not())
@@ -129,6 +146,15 @@ fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, Lexer
         .collect()
 }
 
+/// Defines the base parser for the simple math language. It
+/// does parse a set of tokens, into a equation.
+///
+/// The parser is defined as a function, because it is recursive.
+///
+/// [`recursive`]: https://docs.rs/chumsky/0.1.0/chumsky/recursive/index.html
+/// [`Parser`]: https://docs.rs/chumsky/0.1.0/chumsky/prelude/trait.Parser.html
+/// [`Expr`]: [`Expr`]
+/// [`Equation`]: [`Equation`]
 fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
     // Input Types
     'tokens,
@@ -136,7 +162,11 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
     Spanned<Equation>,
     extra::Err<Rich<'tokens, Token<'src>, Span>>,
 > {
+    // Defines the parser for the expression. It is recursive, because
+    // it can be nested.
     let expr_parser = recursive(|expr| {
+        // Defines the parser for the value. It is the base of the
+        // expression parser.
         let value = select! {
             Token::Number(number) => Expr::Number(number),
             Token::Decimal(int, decimal) => Expr::Decimal(int, decimal),
@@ -144,6 +174,8 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         }
         .labelled("value");
 
+        // Defines the parser for the primary expression. It is the
+        // base of the expression parser.
         let primary = value
             .or(expr
                 .clone()
@@ -224,6 +256,8 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         mul
     });
 
+    // Defines the parser for the equation. It is the base of the
+    // parser of equations and inequations.
     expr_parser
         .clone()
         .then(
@@ -237,6 +271,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         .labelled("equation")
 }
 
+/// Parses a string into an [`Equation`].
+///
+/// [`Equation`]: [`Equation`]
 fn parse(s: &str) -> Spanned<Equation> {
     let filename = "test".to_string();
     let (tokens, lex_errors) = lexer().parse(s).into_output_errors();
