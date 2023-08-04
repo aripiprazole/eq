@@ -373,7 +373,7 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
             .or(brackets)
             .labelled("primary");
 
-        let factor = primary
+        let unary = primary
             .clone()
             .then(just(Token::Identifier("!")).or_not())
             .map_with_state(|(expr, not), span, state: &mut TermArena| match not {
@@ -385,9 +385,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                 }
                 None => expr,
             })
-            .labelled("factor");
+            .labelled("unary");
 
-        let add = factor
+        let factor = unary
             .clone()
             .foldl_with_state(
                 just(Token::Identifier("+"))
@@ -404,9 +404,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     state.intern((expr, span))
                 },
             )
-            .labelled("add");
+            .labelled("factor");
 
-        let mul = add
+        let term = factor
             .clone()
             .foldl_with_state(
                 just(Token::Identifier("*"))
@@ -423,9 +423,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     state.intern((expr, span))
                 },
             )
-            .labelled("mul");
+            .labelled("term");
 
-        mul
+        term
     });
 
     // Defines the parser for the equation. It is the base of the
