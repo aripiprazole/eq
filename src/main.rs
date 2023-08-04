@@ -84,15 +84,6 @@ impl BinOp {
     }
 }
 
-/// A function. This is a function that takes arguments.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum Function {
-    Pow { base: Term, exp: Term },
-    Sqrt(Term),
-    Cbrt(Term),
-    Factorial(Term),
-}
-
 /// A variable. This is a variable that can be assigned to.
 #[derive(Default, Debug, Clone)]
 pub struct Variable {
@@ -127,11 +118,9 @@ pub enum Expr {
     #[default]
     Error,
     Number(usize),
-    Decimal(usize, usize),
     Group(Term),
     Variable(Variable),
     BinOp(BinOp),
-    Apply(Function),
 }
 
 impl Term {
@@ -182,7 +171,6 @@ pub fn show(term: Term, fuel: usize, state: &TermArena) -> String {
     match &state.get(term).0 {
         Expr::Error => "error".into(),
         Expr::Number(n) => format!("{n}"),
-        Expr::Decimal(n, decimal) => format!("{n}.{decimal}"),
         Expr::Group(group) => format!("({})", show(*group, fuel - 1, state)),
         Expr::Variable(variable) => match variable.data() {
             Some(value) => format!("{}", show(value, fuel - 1, state)),
@@ -200,7 +188,6 @@ pub fn show(term: Term, fuel: usize, state: &TermArena) -> String {
 
             format!("({lhs} {op_str} {rhs})")
         }
-        Expr::Apply(_) => todo!(),
     }
 }
 
@@ -346,7 +333,6 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         // expression parser.
         let value = select! {
                 Token::Number(number) => Expr::Number(number),
-                Token::Decimal(int, decimal) => Expr::Decimal(int, decimal),
                 Token::Identifier(identifier) => Expr::Variable(Variable { name: identifier.into(), data: Rc::default() }),
             }
             .map_with_span(|kind, span| (kind, span))
@@ -373,22 +359,7 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
             .or(brackets)
             .labelled("primary");
 
-        let unary = primary
-            .clone()
-            .then(just(Token::Identifier("!")).or_not())
-            .map_with_state(|(expr, not), span, state: &mut TermArena| match not {
-                Some(_) => {
-                    let function = Function::Factorial(expr);
-                    let kind = Expr::Apply(function);
-
-                    state.intern((kind, span))
-                }
-                None => expr,
-            })
-            .labelled("unary");
-
-        let factor = unary
-            .clone()
+        let factor = primary
             .foldl_with_state(
                 just(Token::Identifier("+"))
                     .to(Op::Add)
@@ -407,7 +378,6 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
             .labelled("factor");
 
         let term = factor
-            .clone()
             .foldl_with_state(
                 just(Token::Identifier("*"))
                     .to(Op::Mul)
@@ -684,18 +654,6 @@ impl Term {
 
                             Expr::Number(number)
                         }
-                        Expr::Decimal(_number, _decimal) => return self,
-                        Expr::Group(group) => return group.rewrite(state),
-                        _ => return self,
-                    },
-
-                    // If the term is a decimal
-                    //
-                    // We assume that the term is a decimal and we try to
-                    // reduce it.
-                    Expr::Decimal(_number, _decimal) => match &state.get(rhs).0 {
-                        Expr::Number(_rhs) => return self,
-                        Expr::Decimal(_number, _decimal) => return self,
                         Expr::Group(group) => return group.rewrite(state),
                         _ => return self,
                     },
@@ -725,7 +683,6 @@ impl Term {
 
             // If they are the same, they unify.
             (Expr::Number(_), Expr::Number(_)) => {}
-            (Expr::Decimal(_, _), Expr::Decimal(_, _)) => {}
 
             // If the term is a number, we try the following steps given the example:
             //   9 = x + 6
@@ -814,11 +771,6 @@ impl Term {
                 let another = another.rewrite(state);
 
                 term.unify(another, state)?;
-            }
-
-            // If they aren't compatible, return an error.
-            (kind_a, kind_b) => {
-                return Err(TypeError::NotUnifiable(kind_a.clone(), kind_b.clone()))
             }
         }
 
