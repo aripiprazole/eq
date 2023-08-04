@@ -1,4 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, fmt::Display, hash::Hash, ops::Range, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fmt::Display,
+    hash::Hash,
+    ops::{Deref, Range},
+    rc::Rc,
+};
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{
@@ -97,7 +104,7 @@ pub struct Variable {
 impl Variable {
     /// Gets the data of the variable.
     pub fn data(&self) -> Option<Term> {
-        self.data.borrow().clone()
+        *self.data.borrow().deref()
     }
 }
 
@@ -153,7 +160,7 @@ pub fn show(term: Term, fuel: usize, state: &mut TermArena) -> String {
                 Op::Div => "/",
             };
 
-            format!("{lhs} {op_str} {rhs}")
+            format!("({lhs} {op_str} {rhs})")
         }
         TermKind::Apply(_) => todo!(),
     }
@@ -310,24 +317,15 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 
         let brackets = expr
             .clone()
-            .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
-            .map(TermKind::Group)
-            .map_with_span(|expr, span| (expr, span))
-            .map_with_state(|term, _, state: &mut TermArena| state.insert(term));
+            .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')));
 
         let parenthesis = expr
             .clone()
-            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-            .map(TermKind::Group)
-            .map_with_span(|expr, span| (expr, span))
-            .map_with_state(|term, _, state: &mut TermArena| state.insert(term));
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')));
 
         let braces = expr
             .clone()
-            .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-            .map(TermKind::Group)
-            .map_with_span(|expr, span| (expr, span))
-            .map_with_state(|term, _, state: &mut TermArena| state.insert(term));
+            .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')));
 
         // Defines the parser for the primary expression. It is the
         // base of the expression parser.
@@ -477,37 +475,142 @@ pub enum TypeError {
     IncompatibleOp(Op, Op),
 }
 
+/// Gets the precedence of an operator.
 pub fn op_power(op: Op) -> usize {
     match op {
-        Op::Add | Op::Sub => 2,
-        Op::Mul | Op::Div => 1,
+        Op::Add | Op::Sub => 1,
+        Op::Mul | Op::Div => 2,
     }
+}
+
+/// Distributes a term over another term.
+pub fn distribute(term: Term, op: Op, another: Term, state: &mut TermArena) -> Term {
+    let (kind, span) = &*state.get(term);
+    let new_kind = match kind {
+        TermKind::Group(_) => return term,
+        TermKind::BinOp(bin_op) => {
+            let lhs = apply_distributive_property(bin_op.lhs, state);
+            let rhs = apply_distributive_property(bin_op.rhs, state);
+
+            TermKind::BinOp(BinOp {
+                op: bin_op.op,
+                lhs,
+                rhs,
+            })
+        }
+        _ => TermKind::BinOp(BinOp {
+            op,
+            lhs: term,
+            rhs: another,
+        }),
+    };
+
+    state.insert((new_kind, *span))
+}
+
+/// Applies the distributive property to a term.
+pub fn apply_distributive_property(base: Term, state: &mut TermArena) -> Term {
+    let TermKind::BinOp(bin_op) = &state.get(base).0 else {
+        return base;
+    };
+
+    match (&state.get(bin_op.lhs).0, &state.get(bin_op.rhs).0) {
+        (TermKind::Group(group), _) => distribute(*group, bin_op.op, bin_op.rhs, state),
+        (_, TermKind::Group(group)) => distribute(*group, bin_op.op, bin_op.lhs, state),
+        (_, _) => base,
+    }
+}
+
+/// Applies the associativity rule to a term.
+pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
+    /// Applies the associativity rule to a binary operation.
+    fn associate(lhs: Term, fop: Op, mhs: Term, sop: Op, rhs: Term, st: &mut TermArena) -> BinOp {
+        // RULE: Associativity
+        //
+        // If the term is a binary operation, we try to reduce it
+        // to its weak head normal form using the precedence of
+        // the operators.
+        //
+        // This step is called precedence climbing.
+        //
+        // Evaluate the operation if the precedence of the
+        // operator is higher than the precedence of the
+        // operator of the right hand side.
+        let lhs = whnf(apply_associativity(lhs, st), st);
+        let mhs = whnf(apply_associativity(mhs, st), st);
+        let rhs = whnf(apply_associativity(rhs, st), st);
+
+        if op_power(sop) >= op_power(fop) {
+            BinOp {
+                op: fop,
+                lhs,
+                rhs: st.insert((
+                    TermKind::BinOp(BinOp {
+                        op: sop,
+                        lhs: mhs,
+                        rhs,
+                    }),
+                    (0..0).into(),
+                )),
+            }
+        } else {
+            BinOp {
+                op: fop,
+                lhs: st.insert((
+                    TermKind::BinOp(BinOp {
+                        op: sop,
+                        lhs,
+                        rhs: mhs,
+                    }),
+                    (0..0).into(),
+                )),
+                rhs,
+            }
+        }
+    }
+
+    let (kind, span) = &*state.get(term);
+
+    let TermKind::BinOp(mut bin_op) = kind.clone() else {
+        return term;
+    };
+
+    if let TermKind::BinOp(lhs_bin) = &state.get(bin_op.lhs).0 {
+        bin_op = associate(
+            lhs_bin.lhs,
+            lhs_bin.op,
+            lhs_bin.rhs,
+            bin_op.op,
+            bin_op.rhs,
+            state,
+        );
+    }
+
+    if let TermKind::BinOp(rhs_bin) = &state.get(bin_op.rhs).0 {
+        bin_op = associate(
+            bin_op.lhs,
+            bin_op.op,
+            rhs_bin.lhs,
+            rhs_bin.op,
+            rhs_bin.rhs,
+            state,
+        );
+    }
+
+    state.insert((TermKind::BinOp(bin_op), *span))
 }
 
 /// Reduces a term to its weak head normal form.
 pub fn whnf(term: Term, state: &mut TermArena) -> Term {
+    let term = apply_distributive_property(term, state);
+    let term = apply_associativity(term, state);
+
     let (kind, span) = &*state.get(term);
     let new_kind = match kind {
         TermKind::Group(group) => TermKind::Group(whnf(*group, state)),
         TermKind::BinOp(bin_op) => {
             let lhs = whnf(bin_op.lhs, state);
-            let mut rhs = whnf(bin_op.rhs, state);
-
-            // If the term is a binary operation, we try to reduce it
-            // to its weak head normal form using the precedence of
-            // the operators.
-            //
-            // This step is called precedence climbing.
-            while let TermKind::BinOp(data) = &state.get(rhs).0 {
-                if op_power(bin_op.op) > op_power(data.op) {
-                    // Evaluate the operation if the precedence of the
-                    // operator is higher than the precedence of the
-                    // operator of the right hand side.
-                    rhs = whnf(rhs, state);
-                } else {
-                    break;
-                }
-            }
+            let rhs = whnf(bin_op.rhs, state);
 
             // If the term is a number, we try to reduce it evaluating
             // the operation.
@@ -542,7 +645,7 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                     TermKind::Group(group) => return whnf(*group, state),
                     _ => return term,
                 },
-                    TermKind::Group(group) => return whnf(*group, state),
+                TermKind::Group(group) => return whnf(*group, state),
                 _ => return term,
             }
         }
@@ -666,7 +769,11 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
 
 fn main() {
     let mut state = TermArena::default();
-    let (equation, _) = parse("10 = (x + 3) * 2", &mut state);
+    let (equation, _) = parse("10 = (x + 3) + 2", &mut state);
+    print!("Input: {}", show(equation.lhs, 256, &mut state));
+    print!(" = ");
+    println!("{}", show(equation.rhs, 256, &mut state));
+
     let lhs = whnf(equation.lhs, &mut state);
     let rhs = whnf(equation.rhs, &mut state);
     unify(lhs, rhs, &mut state).unwrap();
@@ -682,5 +789,5 @@ fn main() {
         .collect::<Vec<_>>()
         .join(", ");
 
-    println!("{resolutions}");
+    println!("Output: {resolutions}");
 }
