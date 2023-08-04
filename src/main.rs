@@ -48,6 +48,36 @@ pub struct BinOp {
     pub rhs: Term,
 }
 
+pub fn reverse(bin_op: &BinOp, value: Term, state: &mut TermArena) -> (Term, Term) {
+    let reverse_op = match bin_op.op {
+        Op::Add => Op::Sub,
+        Op::Sub => Op::Add,
+        Op::Mul => Op::Div,
+        Op::Div => Op::Mul,
+    };
+
+    let span: Span = (state.get(bin_op.lhs).1.start..state.get(bin_op.rhs).1.end).into();
+
+    let lhs = state.insert((
+        TermKind::BinOp(BinOp {
+            op: reverse_op,
+            lhs: value,
+            rhs: bin_op.rhs,
+        }),
+        span,
+    ));
+    let rhs = state.insert((
+        TermKind::BinOp(BinOp {
+            op: reverse_op,
+            lhs: bin_op.rhs,
+            rhs: bin_op.lhs,
+        }),
+        span,
+    ));
+
+    (lhs, rhs)
+}
+
 /// A function. This is a function that takes arguments.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Function {
@@ -460,7 +490,7 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
             // the operation.
             match &state.get(lhs).0 {
                 // If the term is a number
-                // 
+                //
                 // We assume that the term is a number and we try to
                 // reduce it.
                 TermKind::Number(lhs) => match &state.get(rhs).0 {
@@ -479,7 +509,7 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                 },
 
                 // If the term is a decimal
-                // 
+                //
                 // We assume that the term is a decimal and we try to
                 // reduce it.
                 TermKind::Decimal(_number, _decimal) => match &state.get(rhs).0 {
@@ -513,6 +543,25 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
         // If they are the same, they unify.
         (TermKind::Number(_), TermKind::Number(_)) => {}
         (TermKind::Decimal(_, _), TermKind::Decimal(_, _)) => {}
+        // If the term is a number, we try the following steps given the example:
+        //   9 = x + 6
+        //
+        // 1. We get the reverse of `+`, which is `-`.
+        // 2. We subtract `6` from both sides, to equate it,
+        //    and since the `9` is a constant, we can reduce
+        //    it to the WHNF.
+        // 3. Got the equation solved, we can unify the `x` with
+        //    the result of the subtraction.
+        //
+        //    3 = x and then x = 3
+        (TermKind::Number(_), TermKind::BinOp(bin_op)) => {
+            let (term, another) = reverse(bin_op, term, state);
+            unify(term, another, state)?;
+        }
+        (TermKind::BinOp(bin_op), TermKind::Number(_)) => {
+            let (term, another) = reverse(bin_op, another, state);
+            unify(term, another, state)?;
+        }
 
         // If they are variables, they unify if they are the same.
         //
