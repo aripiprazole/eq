@@ -477,6 +477,13 @@ pub enum TypeError {
     IncompatibleOp(Op, Op),
 }
 
+pub fn op_power(op: Op) -> usize {
+    match op {
+        Op::Add | Op::Sub => 2,
+        Op::Mul | Op::Div => 1,
+    }
+}
+
 /// Reduces a term to its weak head normal form.
 pub fn whnf(term: Term, state: &mut TermArena) -> Term {
     let (kind, span) = &*state.get(term);
@@ -484,7 +491,23 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
         TermKind::Group(group) => TermKind::Group(whnf(*group, state)),
         TermKind::BinOp(bin_op) => {
             let lhs = whnf(bin_op.lhs, state);
-            let rhs = whnf(bin_op.rhs, state);
+            let mut rhs = whnf(bin_op.rhs, state);
+
+            // If the term is a binary operation, we try to reduce it
+            // to its weak head normal form using the precedence of
+            // the operators.
+            //
+            // This step is called precedence climbing.
+            while let TermKind::BinOp(data) = &state.get(rhs).0 {
+                if op_power(bin_op.op) > op_power(data.op) {
+                    // Evaluate the operation if the precedence of the
+                    // operator is higher than the precedence of the
+                    // operator of the right hand side.
+                    rhs = whnf(rhs, state);
+                } else {
+                    break;
+                }
+            }
 
             // If the term is a number, we try to reduce it evaluating
             // the operation.
@@ -505,6 +528,7 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                         TermKind::Number(number)
                     }
                     TermKind::Decimal(_number, _decimal) => return term,
+                    TermKind::Group(group) => return whnf(*group, state),
                     _ => return term,
                 },
 
@@ -515,8 +539,10 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                 TermKind::Decimal(_number, _decimal) => match &state.get(rhs).0 {
                     TermKind::Number(_rhs) => return term,
                     TermKind::Decimal(_number, _decimal) => return term,
+                    TermKind::Group(group) => return whnf(*group, state),
                     _ => return term,
                 },
+                    TermKind::Group(group) => return whnf(*group, state),
                 _ => return term,
             }
         }
@@ -543,6 +569,7 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
         // If they are the same, they unify.
         (TermKind::Number(_), TermKind::Number(_)) => {}
         (TermKind::Decimal(_, _), TermKind::Decimal(_, _)) => {}
+
         // If the term is a number, we try the following steps given the example:
         //   9 = x + 6
         //
@@ -639,7 +666,7 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
 
 fn main() {
     let mut state = TermArena::default();
-    let (equation, _) = parse("3 * 3 = x + 6", &mut state);
+    let (equation, _) = parse("10 = (x + 3) * 2", &mut state);
     let lhs = whnf(equation.lhs, &mut state);
     let rhs = whnf(equation.rhs, &mut state);
     unify(lhs, rhs, &mut state).unwrap();
