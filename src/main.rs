@@ -1,7 +1,7 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    fmt::Display,
+    fmt::{Debug, Display},
     hash::Hash,
     ops::{Deref, Range},
     rc::Rc,
@@ -65,16 +65,16 @@ pub fn reverse(bin_op: &BinOp, value: Term, state: &mut TermArena) -> (Term, Ter
 
     let span: Span = (state.get(bin_op.lhs).1.start..state.get(bin_op.rhs).1.end).into();
 
-    let lhs = state.insert((
-        TermKind::BinOp(BinOp {
+    let lhs = state.intern((
+        Expr::BinOp(BinOp {
             op: reverse_op,
             lhs: value,
             rhs: bin_op.rhs,
         }),
         span,
     ));
-    let rhs = state.insert((
-        TermKind::BinOp(BinOp {
+    let rhs = state.intern((
+        Expr::BinOp(BinOp {
             op: reverse_op,
             lhs: bin_op.rhs,
             rhs: bin_op.lhs,
@@ -124,7 +124,7 @@ impl Hash for Variable {
 
 /// A term in the calculator. This is the lowest level of the calculator.
 #[derive(Default, Debug, Clone, Hash, PartialEq, Eq)]
-pub enum TermKind {
+pub enum Expr {
     #[default]
     Error,
     Number(usize),
@@ -135,22 +135,61 @@ pub enum TermKind {
     Apply(Function),
 }
 
+impl Term {
+    /// Creates a debug wrapper for the term, which will print
+    /// the term in a human-readable format.
+    pub fn debug(self, arena: &TermArena) -> ExprDebug {
+        self.debug_with_fuel(128, arena)
+    }
+
+    /// Creates a debug wrapper for the term, which will print
+    /// the term in a human-readable format.
+    ///
+    /// With specified fuel.
+    pub fn debug_with_fuel(self, fuel: usize, arena: &TermArena) -> ExprDebug {
+        ExprDebug {
+            arena,
+            term: self,
+            fuel,
+        }
+    }
+}
+
+/// A debug wrapper for a term, which will print the term in a human-readable format.
+#[derive(Copy, Clone)]
+pub struct ExprDebug<'a> {
+    arena: &'a TermArena,
+    term: Term,
+
+    /// The amount of fuel to use when printing the term.
+    ///
+    /// The fuel is used to prevent infinite recursion when printing
+    /// the term. If the fuel runs out, the term will be printed as `…`.
+    fuel: usize,
+}
+
+impl Debug for ExprDebug<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", show(self.term, self.fuel, self.arena))
+    }
+}
+
 /// Shows a term in a human-readable format.
-pub fn show(term: Term, fuel: usize, state: &mut TermArena) -> String {
+pub fn show(term: Term, fuel: usize, state: &TermArena) -> String {
     if fuel == 0 {
         return "…".into();
     }
 
     match &state.get(term).0 {
-        TermKind::Error => "error".into(),
-        TermKind::Number(n) => format!("{n}"),
-        TermKind::Decimal(n, decimal) => format!("{n}.{decimal}"),
-        TermKind::Group(group) => format!("({})", show(*group, fuel - 1, state)),
-        TermKind::Variable(variable) => match variable.data() {
+        Expr::Error => "error".into(),
+        Expr::Number(n) => format!("{n}"),
+        Expr::Decimal(n, decimal) => format!("{n}.{decimal}"),
+        Expr::Group(group) => format!("({})", show(*group, fuel - 1, state)),
+        Expr::Variable(variable) => match variable.data() {
             Some(value) => format!("{}", show(value, fuel - 1, state)),
             None => format!("?{}", variable.name),
         },
-        TermKind::BinOp(bin_op) => {
+        Expr::BinOp(bin_op) => {
             let lhs = show(bin_op.lhs, fuel - 1, state);
             let rhs = show(bin_op.rhs, fuel - 1, state);
             let op_str = match bin_op.op {
@@ -162,7 +201,7 @@ pub fn show(term: Term, fuel: usize, state: &mut TermArena) -> String {
 
             format!("({lhs} {op_str} {rhs})")
         }
-        TermKind::Apply(_) => todo!(),
+        Expr::Apply(_) => todo!(),
     }
 }
 
@@ -171,13 +210,13 @@ pub struct Term(usize);
 
 #[derive(Default)]
 pub struct TermArena {
-    pub id_to_slot: HashMap<Term, Rc<Spanned<TermKind>>>,
-    pub slot_to_id: HashMap<TermKind, Term>,
+    pub id_to_slot: HashMap<Term, Rc<Spanned<Expr>>>,
+    pub slot_to_id: HashMap<Expr, Term>,
 }
 
 impl TermArena {
     /// Creates a new term in the arena
-    pub fn insert(&mut self, term: Spanned<TermKind>) -> Term {
+    pub fn intern(&mut self, term: Spanned<Expr>) -> Term {
         let id = Term(fxhash::hash(&term.0));
         self.id_to_slot.insert(id, Rc::new(term.clone()));
         self.slot_to_id.insert(term.0, id);
@@ -185,11 +224,11 @@ impl TermArena {
     }
 
     /// Gets the term from the arena.
-    pub fn get(&self, id: Term) -> Rc<Spanned<TermKind>> {
+    pub fn get(&self, id: Term) -> Rc<Spanned<Expr>> {
         self.id_to_slot
             .get(&id)
             .cloned()
-            .unwrap_or_else(|| Rc::new((TermKind::Error, Range::<usize>::default().into())))
+            .unwrap_or_else(|| Rc::new((Expr::Error, Range::<usize>::default().into())))
     }
 
     /// Gets the term from the arena.
@@ -197,7 +236,7 @@ impl TermArena {
         self.id_to_slot
             .iter()
             .filter_map(|(_, slot)| {
-                if let TermKind::Variable(variable) = &slot.0 {
+                if let Expr::Variable(variable) = &slot.0 {
                     variable.data().map(|value| (variable.name.clone(), value))
                 } else {
                     None
@@ -307,12 +346,12 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         // Defines the parser for the value. It is the base of the
         // expression parser.
         let value = select! {
-                Token::Number(number) => TermKind::Number(number),
-                Token::Decimal(int, decimal) => TermKind::Decimal(int, decimal),
-                Token::Identifier(identifier) => TermKind::Variable(Variable { name: identifier.into(), data: Rc::default() }),
+                Token::Number(number) => Expr::Number(number),
+                Token::Decimal(int, decimal) => Expr::Decimal(int, decimal),
+                Token::Identifier(identifier) => Expr::Variable(Variable { name: identifier.into(), data: Rc::default() }),
             }
             .map_with_span(|kind, span| (kind, span))
-            .map_with_state(|term, _, state: &mut TermArena| state.insert(term))
+            .map_with_state(|term, _, state: &mut TermArena| state.intern(term))
             .labelled("value");
 
         let brackets = expr
@@ -341,9 +380,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
             .map_with_state(|(expr, not), span, state: &mut TermArena| match not {
                 Some(_) => {
                     let function = Function::Factorial(expr);
-                    let kind = TermKind::Apply(function);
+                    let kind = Expr::Apply(function);
 
-                    state.insert((kind, span))
+                    state.intern((kind, span))
                 }
                 None => expr,
             })
@@ -362,8 +401,8 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     let (_, snd) = &*state.get(rhs);
 
                     let span = SimpleSpan::new(fst.start, snd.end);
-                    let expr = TermKind::BinOp(BinOp { op, lhs, rhs });
-                    state.insert((expr, span))
+                    let expr = Expr::BinOp(BinOp { op, lhs, rhs });
+                    state.intern((expr, span))
                 },
             )
             .labelled("add");
@@ -381,8 +420,8 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     let (_, snd) = &*state.get(rhs);
 
                     let span = SimpleSpan::new(fst.start, snd.end);
-                    let expr = TermKind::BinOp(BinOp { op, lhs, rhs });
-                    state.insert((expr, span))
+                    let expr = Expr::BinOp(BinOp { op, lhs, rhs });
+                    state.intern((expr, span))
                 },
             )
             .labelled("mul");
@@ -458,8 +497,8 @@ fn parse(s: &str, state: &mut TermArena) -> Spanned<Equation> {
         let span: Span = (s.len()..s.len()).into();
         let equation = Equation {
             kind: EqKind::Eq,
-            lhs: state.insert((TermKind::Error, span)),
-            rhs: state.insert((TermKind::Error, span)),
+            lhs: state.intern((Expr::Error, span)),
+            rhs: state.intern((Expr::Error, span)),
         };
         (equation, span)
     })
@@ -469,7 +508,7 @@ fn parse(s: &str, state: &mut TermArena) -> Spanned<Equation> {
 #[derive(Debug, Clone)]
 pub enum TypeError {
     /// The two terms are not unifiable.
-    NotUnifiable(TermKind, TermKind),
+    NotUnifiable(Expr, Expr),
 
     /// The two terms are not compatible.
     IncompatibleOp(Op, Op),
@@ -487,36 +526,36 @@ pub fn op_power(op: Op) -> usize {
 pub fn distribute(term: Term, op: Op, another: Term, state: &mut TermArena) -> Term {
     let (kind, span) = &*state.get(term);
     let new_kind = match kind {
-        TermKind::Group(_) => return term,
-        TermKind::BinOp(bin_op) => {
+        Expr::Group(_) => return term,
+        Expr::BinOp(bin_op) => {
             let lhs = apply_distributive_property(bin_op.lhs, state);
             let rhs = apply_distributive_property(bin_op.rhs, state);
 
-            TermKind::BinOp(BinOp {
+            Expr::BinOp(BinOp {
                 op: bin_op.op,
                 lhs,
                 rhs,
             })
         }
-        _ => TermKind::BinOp(BinOp {
+        _ => Expr::BinOp(BinOp {
             op,
             lhs: term,
             rhs: another,
         }),
     };
 
-    state.insert((new_kind, *span))
+    state.intern((new_kind, *span))
 }
 
 /// Applies the distributive property to a term.
 pub fn apply_distributive_property(base: Term, state: &mut TermArena) -> Term {
-    let TermKind::BinOp(bin_op) = &state.get(base).0 else {
+    let Expr::BinOp(bin_op) = &state.get(base).0 else {
         return base;
     };
 
     match (&state.get(bin_op.lhs).0, &state.get(bin_op.rhs).0) {
-        (TermKind::Group(group), _) => distribute(*group, bin_op.op, bin_op.rhs, state),
-        (_, TermKind::Group(group)) => distribute(*group, bin_op.op, bin_op.lhs, state),
+        (Expr::Group(group), _) => distribute(*group, bin_op.op, bin_op.rhs, state),
+        (_, Expr::Group(group)) => distribute(*group, bin_op.op, bin_op.lhs, state),
         (_, _) => base,
     }
 }
@@ -540,12 +579,15 @@ pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
         let mhs = whnf(apply_associativity(mhs, st), st);
         let rhs = whnf(apply_associativity(rhs, st), st);
 
+        // If the precedence of the operator of the left hand side
+        // is higher than the precedence of the operator of the
+        // right hand side, we change the order.
         if op_power(sop) >= op_power(fop) {
             BinOp {
                 op: fop,
                 lhs,
-                rhs: st.insert((
-                    TermKind::BinOp(BinOp {
+                rhs: st.intern((
+                    Expr::BinOp(BinOp {
                         op: sop,
                         lhs: mhs,
                         rhs,
@@ -556,8 +598,8 @@ pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
         } else {
             BinOp {
                 op: fop,
-                lhs: st.insert((
-                    TermKind::BinOp(BinOp {
+                lhs: st.intern((
+                    Expr::BinOp(BinOp {
                         op: sop,
                         lhs,
                         rhs: mhs,
@@ -571,11 +613,15 @@ pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
 
     let (kind, span) = &*state.get(term);
 
-    let TermKind::BinOp(mut bin_op) = kind.clone() else {
+    // If the term is not a binary operation, we return it.
+    let Expr::BinOp(mut bin_op) = kind.clone() else {
         return term;
     };
 
-    if let TermKind::BinOp(lhs_bin) = &state.get(bin_op.lhs).0 {
+    // Apply associativy to the leftmost side of the expression.
+    //
+    // This is done by recursively applying the associativity
+    if let Expr::BinOp(lhs_bin) = &state.get(bin_op.lhs).0 {
         bin_op = associate(
             lhs_bin.lhs,
             lhs_bin.op,
@@ -586,7 +632,10 @@ pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
         );
     }
 
-    if let TermKind::BinOp(rhs_bin) = &state.get(bin_op.rhs).0 {
+    // Apply associativy to the rightmost side of the expression.
+    //
+    // This is done by recursively applying the associativity
+    if let Expr::BinOp(rhs_bin) = &state.get(bin_op.rhs).0 {
         bin_op = associate(
             bin_op.lhs,
             bin_op.op,
@@ -597,7 +646,8 @@ pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
         );
     }
 
-    state.insert((TermKind::BinOp(bin_op), *span))
+    // Reintern the term.
+    state.intern((Expr::BinOp(bin_op), *span))
 }
 
 /// Reduces a term to its weak head normal form.
@@ -607,8 +657,8 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
 
     let (kind, span) = &*state.get(term);
     let new_kind = match kind {
-        TermKind::Group(group) => TermKind::Group(whnf(*group, state)),
-        TermKind::BinOp(bin_op) => {
+        Expr::Group(group) => Expr::Group(whnf(*group, state)),
+        Expr::BinOp(bin_op) => {
             let lhs = whnf(bin_op.lhs, state);
             let rhs = whnf(bin_op.rhs, state);
 
@@ -619,8 +669,8 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                 //
                 // We assume that the term is a number and we try to
                 // reduce it.
-                TermKind::Number(lhs) => match &state.get(rhs).0 {
-                    TermKind::Number(rhs) => {
+                Expr::Number(lhs) => match &state.get(rhs).0 {
+                    Expr::Number(rhs) => {
                         let number = match bin_op.op {
                             Op::Add => lhs + rhs,
                             Op::Sub => lhs - rhs,
@@ -628,10 +678,10 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                             Op::Div => lhs / rhs,
                         };
 
-                        TermKind::Number(number)
+                        Expr::Number(number)
                     }
-                    TermKind::Decimal(_number, _decimal) => return term,
-                    TermKind::Group(group) => return whnf(*group, state),
+                    Expr::Decimal(_number, _decimal) => return term,
+                    Expr::Group(group) => return whnf(*group, state),
                     _ => return term,
                 },
 
@@ -639,24 +689,24 @@ pub fn whnf(term: Term, state: &mut TermArena) -> Term {
                 //
                 // We assume that the term is a decimal and we try to
                 // reduce it.
-                TermKind::Decimal(_number, _decimal) => match &state.get(rhs).0 {
-                    TermKind::Number(_rhs) => return term,
-                    TermKind::Decimal(_number, _decimal) => return term,
-                    TermKind::Group(group) => return whnf(*group, state),
+                Expr::Decimal(_number, _decimal) => match &state.get(rhs).0 {
+                    Expr::Number(_rhs) => return term,
+                    Expr::Decimal(_number, _decimal) => return term,
+                    Expr::Group(group) => return whnf(*group, state),
                     _ => return term,
                 },
-                TermKind::Group(group) => return whnf(*group, state),
+                Expr::Group(group) => return whnf(*group, state),
                 _ => return term,
             }
         }
         // If the term is a variable, we try to reduce it.
-        TermKind::Variable(hole) => match hole.data() {
+        Expr::Variable(hole) => match hole.data() {
             Some(value) => return whnf(value, state),
             None => kind.clone(),
         },
         _ => kind.clone(),
     };
-    state.insert((new_kind, *span))
+    state.intern((new_kind, *span))
 }
 
 /// Unifies two terms. It's the main point of the equation.
@@ -666,12 +716,12 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
     match (&state.get(term).0, &state.get(another).0) {
         // Errors are sentinel values, so they are threated like holes
         // and they are ignored, anything unifies with them.
-        (TermKind::Error, _) => {}
-        (_, TermKind::Error) => {}
+        (Expr::Error, _) => {}
+        (_, Expr::Error) => {}
 
         // If they are the same, they unify.
-        (TermKind::Number(_), TermKind::Number(_)) => {}
-        (TermKind::Decimal(_, _), TermKind::Decimal(_, _)) => {}
+        (Expr::Number(_), Expr::Number(_)) => {}
+        (Expr::Decimal(_, _), Expr::Decimal(_, _)) => {}
 
         // If the term is a number, we try the following steps given the example:
         //   9 = x + 6
@@ -684,11 +734,11 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
         //    the result of the subtraction.
         //
         //    3 = x and then x = 3
-        (TermKind::Number(_), TermKind::BinOp(bin_op)) => {
+        (Expr::Number(_), Expr::BinOp(bin_op)) => {
             let (term, another) = reverse(bin_op, term, state);
             unify(term, another, state)?;
         }
-        (TermKind::BinOp(bin_op), TermKind::Number(_)) => {
+        (Expr::BinOp(bin_op), Expr::Number(_)) => {
             let (term, another) = reverse(bin_op, another, state);
             unify(term, another, state)?;
         }
@@ -698,13 +748,13 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
         // This check isn't inehenterly necessary, but it's a good catcher
         // to avoid panics, because if the variables are the same, they will
         // try to borrow the same data, and it will panic with ref cells.
-        (TermKind::Variable(variable_a), TermKind::Variable(variable_b))
+        (Expr::Variable(variable_a), Expr::Variable(variable_b))
             if variable_a.name == variable_b.name => {}
 
         // Unifies the variable with the term, if the variable is not bound. If
         // it's bound, it will try to unify, if it's not unifiable, it will
         // return an error.
-        (_, TermKind::Variable(variable)) => {
+        (_, Expr::Variable(variable)) => {
             match variable.data() {
                 // If the variable is already bound, we unify the bound
                 Some(bound) => {
@@ -716,7 +766,7 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
                 }
             }
         }
-        (TermKind::Variable(variable), _) => {
+        (Expr::Variable(variable), _) => {
             match variable.data() {
                 // If the variable is already bound, we unify the bound
                 Some(bound) => {
@@ -731,7 +781,7 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
 
         // Unifies the bin ops if they are the same, and unifies the
         // operands.
-        (TermKind::BinOp(bin_op_a), TermKind::BinOp(bin_op_b)) => {
+        (Expr::BinOp(bin_op_a), Expr::BinOp(bin_op_b)) => {
             if bin_op_a.op == bin_op_b.op {
                 let lhs_a = whnf(bin_op_a.lhs, state);
                 let rhs_a = whnf(bin_op_a.rhs, state);
@@ -747,13 +797,13 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
         }
 
         // Reduce groups to the normal form
-        (_, TermKind::Group(another)) => {
+        (_, Expr::Group(another)) => {
             let term = whnf(term, state);
             let another = whnf(*another, state);
 
             unify(term, another, state)?;
         }
-        (TermKind::Group(term), _) => {
+        (Expr::Group(term), _) => {
             let term = whnf(*term, state);
             let another = whnf(another, state);
 
@@ -770,9 +820,9 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
 fn main() {
     let mut state = TermArena::default();
     let (equation, _) = parse("10 = (x + 3) + 2", &mut state);
-    print!("Input: {}", show(equation.lhs, 256, &mut state));
+    print!("Input: {:?}", equation.rhs.debug(&state));
     print!(" = ");
-    println!("{}", show(equation.rhs, 256, &mut state));
+    println!("{:?}", equation.rhs.debug(&state));
 
     let lhs = whnf(equation.lhs, &mut state);
     let rhs = whnf(equation.rhs, &mut state);
@@ -781,11 +831,7 @@ fn main() {
     let resolutions = state
         .resolutions()
         .into_iter()
-        .map(|(incognito, term)| {
-            let term = show(term, 256, &mut state);
-
-            format!("{incognito} = {term}")
-        })
+        .map(|(incognito, term)| format!("{incognito} = {:?}", term.debug(&state)))
         .collect::<Vec<_>>()
         .join(", ");
 
