@@ -522,311 +522,316 @@ pub fn op_power(op: Op) -> usize {
     }
 }
 
-/// Distributes a term over another term.
-pub fn distribute(term: Term, op: Op, another: Term, state: &mut TermArena) -> Term {
-    let (kind, span) = &*state.get(term);
-    let new_kind = match kind {
-        Expr::Group(_) => return term,
-        Expr::BinOp(bin_op) => {
-            let lhs = apply_distributive_property(bin_op.lhs, state);
-            let rhs = apply_distributive_property(bin_op.rhs, state);
+/// Applies the associativity rule to a binary operation.
+fn associate(lhs: Term, fop: Op, mhs: Term, sop: Op, rhs: Term, state: &mut TermArena) -> BinOp {
+    // RULE: Associativity
+    //
+    // If the term is a binary operation, we try to reduce it
+    // to its weak head normal form using the precedence of
+    // the operators.
+    //
+    // This step is called precedence climbing.
+    //
+    // Evaluate the operation if the precedence of the
+    // operator is higher than the precedence of the
+    // operator of the right hand side.
+    let lhs = lhs.apply_associativity(state).whnf(state);
+    let mhs = mhs.apply_associativity(state).whnf(state);
+    let rhs = rhs.apply_associativity(state).whnf(state);
 
-            Expr::BinOp(BinOp {
-                op: bin_op.op,
-                lhs,
-                rhs,
-            })
+    // If the precedence of the operator of the left hand side
+    // is higher than the precedence of the operator of the
+    // right hand side, we change the order.
+    if op_power(sop) >= op_power(fop) {
+        BinOp {
+            op: fop,
+            lhs,
+            rhs: state.intern((
+                Expr::BinOp(BinOp {
+                    op: sop,
+                    lhs: mhs,
+                    rhs,
+                }),
+                (0..0).into(),
+            )),
         }
-        _ => Expr::BinOp(BinOp {
-            op,
-            lhs: term,
-            rhs: another,
-        }),
-    };
-
-    state.intern((new_kind, *span))
-}
-
-/// Applies the distributive property to a term.
-pub fn apply_distributive_property(base: Term, state: &mut TermArena) -> Term {
-    let Expr::BinOp(bin_op) = &state.get(base).0 else {
-        return base;
-    };
-
-    match (&state.get(bin_op.lhs).0, &state.get(bin_op.rhs).0) {
-        (Expr::Group(group), _) => distribute(*group, bin_op.op, bin_op.rhs, state),
-        (_, Expr::Group(group)) => distribute(*group, bin_op.op, bin_op.lhs, state),
-        (_, _) => base,
-    }
-}
-
-/// Applies the associativity rule to a term.
-pub fn apply_associativity(term: Term, state: &mut TermArena) -> Term {
-    /// Applies the associativity rule to a binary operation.
-    fn associate(lhs: Term, fop: Op, mhs: Term, sop: Op, rhs: Term, st: &mut TermArena) -> BinOp {
-        // RULE: Associativity
-        //
-        // If the term is a binary operation, we try to reduce it
-        // to its weak head normal form using the precedence of
-        // the operators.
-        //
-        // This step is called precedence climbing.
-        //
-        // Evaluate the operation if the precedence of the
-        // operator is higher than the precedence of the
-        // operator of the right hand side.
-        let lhs = whnf(apply_associativity(lhs, st), st);
-        let mhs = whnf(apply_associativity(mhs, st), st);
-        let rhs = whnf(apply_associativity(rhs, st), st);
-
-        // If the precedence of the operator of the left hand side
-        // is higher than the precedence of the operator of the
-        // right hand side, we change the order.
-        if op_power(sop) >= op_power(fop) {
-            BinOp {
-                op: fop,
-                lhs,
-                rhs: st.intern((
-                    Expr::BinOp(BinOp {
-                        op: sop,
-                        lhs: mhs,
-                        rhs,
-                    }),
-                    (0..0).into(),
-                )),
-            }
-        } else {
-            BinOp {
-                op: fop,
-                lhs: st.intern((
-                    Expr::BinOp(BinOp {
-                        op: sop,
-                        lhs,
-                        rhs: mhs,
-                    }),
-                    (0..0).into(),
-                )),
-                rhs,
-            }
+    } else {
+        BinOp {
+            op: fop,
+            lhs: state.intern((
+                Expr::BinOp(BinOp {
+                    op: sop,
+                    lhs,
+                    rhs: mhs,
+                }),
+                (0..0).into(),
+            )),
+            rhs,
         }
     }
-
-    let (kind, span) = &*state.get(term);
-
-    // If the term is not a binary operation, we return it.
-    let Expr::BinOp(mut bin_op) = kind.clone() else {
-        return term;
-    };
-
-    // Apply associativy to the leftmost side of the expression.
-    //
-    // This is done by recursively applying the associativity
-    if let Expr::BinOp(lhs_bin) = &state.get(bin_op.lhs).0 {
-        bin_op = associate(
-            lhs_bin.lhs,
-            lhs_bin.op,
-            lhs_bin.rhs,
-            bin_op.op,
-            bin_op.rhs,
-            state,
-        );
-    }
-
-    // Apply associativy to the rightmost side of the expression.
-    //
-    // This is done by recursively applying the associativity
-    if let Expr::BinOp(rhs_bin) = &state.get(bin_op.rhs).0 {
-        bin_op = associate(
-            bin_op.lhs,
-            bin_op.op,
-            rhs_bin.lhs,
-            rhs_bin.op,
-            rhs_bin.rhs,
-            state,
-        );
-    }
-
-    // Reintern the term.
-    state.intern((Expr::BinOp(bin_op), *span))
 }
 
-/// Reduces a term to its weak head normal form.
-pub fn whnf(term: Term, state: &mut TermArena) -> Term {
-    let term = apply_distributive_property(term, state);
-    let term = apply_associativity(term, state);
+impl Term {
+    /// Distributes a term over another term.
+    pub fn distribute(self, op: Op, another: Term, state: &mut TermArena) -> Term {
+        let (kind, span) = &*state.get(self);
+        let new_kind = match kind {
+            Expr::Group(_) => return self,
+            Expr::BinOp(bin_op) => {
+                let lhs = bin_op.lhs.apply_distributive_property(state);
+                let rhs = bin_op.rhs.apply_distributive_property(state);
 
-    let (kind, span) = &*state.get(term);
-    let new_kind = match kind {
-        Expr::Group(group) => Expr::Group(whnf(*group, state)),
-        Expr::BinOp(bin_op) => {
-            let lhs = whnf(bin_op.lhs, state);
-            let rhs = whnf(bin_op.rhs, state);
+                Expr::BinOp(BinOp {
+                    op: bin_op.op,
+                    lhs,
+                    rhs,
+                })
+            }
+            _ => Expr::BinOp(BinOp {
+                op,
+                lhs: self,
+                rhs: another,
+            }),
+        };
 
-            // If the term is a number, we try to reduce it evaluating
-            // the operation.
-            match &state.get(lhs).0 {
-                // If the term is a number
-                //
-                // We assume that the term is a number and we try to
-                // reduce it.
-                Expr::Number(lhs) => match &state.get(rhs).0 {
-                    Expr::Number(rhs) => {
-                        let number = match bin_op.op {
-                            Op::Add => lhs + rhs,
-                            Op::Sub => lhs - rhs,
-                            Op::Mul => lhs * rhs,
-                            Op::Div => lhs / rhs,
-                        };
+        state.intern((new_kind, *span))
+    }
 
-                        Expr::Number(number)
+    /// Applies the distributive property to a term.
+    pub fn apply_distributive_property(self, state: &mut TermArena) -> Term {
+        let Expr::BinOp(bin_op) = &state.get(self).0 else {
+            return self;
+        };
+
+        match (&state.get(bin_op.lhs).0, &state.get(bin_op.rhs).0) {
+            (Expr::Group(group), _) => group.distribute(bin_op.op, bin_op.rhs, state),
+            (_, Expr::Group(group)) => group.distribute(bin_op.op, bin_op.lhs, state),
+            (_, _) => self,
+        }
+    }
+
+    /// Applies the associativity rule to a term.
+    pub fn apply_associativity(self, state: &mut TermArena) -> Term {
+        let (kind, span) = &*state.get(self);
+
+        // If the term is not a binary operation, we return it.
+        let Expr::BinOp(mut bin_op) = kind.clone() else {
+            return self;
+        };
+
+        // Apply associativy to the leftmost side of the expression.
+        //
+        // This is done by recursively applying the associativity
+        if let Expr::BinOp(lhs_bin) = &state.get(bin_op.lhs).0 {
+            bin_op = associate(
+                lhs_bin.lhs,
+                lhs_bin.op,
+                lhs_bin.rhs,
+                bin_op.op,
+                bin_op.rhs,
+                state,
+            );
+        }
+
+        // Apply associativy to the rightmost side of the expression.
+        //
+        // This is done by recursively applying the associativity
+        if let Expr::BinOp(rhs_bin) = &state.get(bin_op.rhs).0 {
+            bin_op = associate(
+                bin_op.lhs,
+                bin_op.op,
+                rhs_bin.lhs,
+                rhs_bin.op,
+                rhs_bin.rhs,
+                state,
+            );
+        }
+
+        // Reintern the term.
+        state.intern((Expr::BinOp(bin_op), *span))
+    }
+
+    /// Reduces a term to its weak head normal form.
+    pub fn whnf(self, state: &mut TermArena) -> Term {
+        let term = self
+            .apply_distributive_property(state)
+            .apply_associativity(state);
+
+        let (kind, span) = &*state.get(term);
+        let new_kind = match kind {
+            Expr::Group(group) => Expr::Group(group.whnf(state)),
+            Expr::BinOp(bin_op) => {
+                let lhs = bin_op.lhs.whnf(state);
+                let rhs = bin_op.rhs.whnf(state);
+
+                // If the term is a number, we try to reduce it evaluating
+                // the operation.
+                match &state.get(lhs).0 {
+                    // If the term is a number
+                    //
+                    // We assume that the term is a number and we try to
+                    // reduce it.
+                    Expr::Number(lhs) => match &state.get(rhs).0 {
+                        Expr::Number(rhs) => {
+                            let number = match bin_op.op {
+                                Op::Add => lhs + rhs,
+                                Op::Sub => lhs - rhs,
+                                Op::Mul => lhs * rhs,
+                                Op::Div => lhs / rhs,
+                            };
+
+                            Expr::Number(number)
+                        }
+                        Expr::Decimal(_number, _decimal) => return term,
+                        Expr::Group(group) => return group.whnf(state),
+                        _ => return term,
+                    },
+
+                    // If the term is a decimal
+                    //
+                    // We assume that the term is a decimal and we try to
+                    // reduce it.
+                    Expr::Decimal(_number, _decimal) => match &state.get(rhs).0 {
+                        Expr::Number(_rhs) => return term,
+                        Expr::Decimal(_number, _decimal) => return term,
+                        Expr::Group(group) => return group.whnf(state),
+                        _ => return term,
+                    },
+                    Expr::Group(group) => return group.whnf(state),
+                    _ => return term,
+                }
+            }
+            // If the term is a variable, we try to reduce it.
+            Expr::Variable(hole) => match hole.data() {
+                Some(value) => return value.whnf(state),
+                None => kind.clone(),
+            },
+            _ => kind.clone(),
+        };
+        state.intern((new_kind, *span))
+    }
+
+    /// Unifies two terms. It's the main point of the equation.
+    ///
+    /// The logic relies here.
+    pub fn unify(self, another: Term, state: &mut TermArena) -> Result<(), TypeError> {
+        match (&state.get(self).0, &state.get(another).0) {
+            // Errors are sentinel values, so they are threated like holes
+            // and they are ignored, anything unifies with them.
+            (Expr::Error, _) => {}
+            (_, Expr::Error) => {}
+
+            // If they are the same, they unify.
+            (Expr::Number(_), Expr::Number(_)) => {}
+            (Expr::Decimal(_, _), Expr::Decimal(_, _)) => {}
+
+            // If the term is a number, we try the following steps given the example:
+            //   9 = x + 6
+            //
+            // 1. We get the reverse of `+`, which is `-`.
+            // 2. We subtract `6` from both sides, to equate it,
+            //    and since the `9` is a constant, we can reduce
+            //    it to the WHNF.
+            // 3. Got the equation solved, we can unify the `x` with
+            //    the result of the subtraction.
+            //
+            //    3 = x and then x = 3
+            (Expr::Number(_), Expr::BinOp(bin_op)) => {
+                let (term, another) = reverse(bin_op, self, state);
+                term.unify(another, state)?;
+            }
+            (Expr::BinOp(bin_op), Expr::Number(_)) => {
+                let (term, another) = reverse(bin_op, another, state);
+                term.unify(another, state)?;
+            }
+
+            // If they are variables, they unify if they are the same.
+            //
+            // This check isn't inehenterly necessary, but it's a good catcher
+            // to avoid panics, because if the variables are the same, they will
+            // try to borrow the same data, and it will panic with ref cells.
+            (Expr::Variable(variable_a), Expr::Variable(variable_b))
+                if variable_a.name == variable_b.name => {}
+
+            // Unifies the variable with the term, if the variable is not bound. If
+            // it's bound, it will try to unify, if it's not unifiable, it will
+            // return an error.
+            (_, Expr::Variable(variable)) => {
+                match variable.data() {
+                    // If the variable is already bound, we unify the bound
+                    Some(bound) => {
+                        self.unify(bound, state)?;
                     }
-                    Expr::Decimal(_number, _decimal) => return term,
-                    Expr::Group(group) => return whnf(*group, state),
-                    _ => return term,
-                },
-
-                // If the term is a decimal
-                //
-                // We assume that the term is a decimal and we try to
-                // reduce it.
-                Expr::Decimal(_number, _decimal) => match &state.get(rhs).0 {
-                    Expr::Number(_rhs) => return term,
-                    Expr::Decimal(_number, _decimal) => return term,
-                    Expr::Group(group) => return whnf(*group, state),
-                    _ => return term,
-                },
-                Expr::Group(group) => return whnf(*group, state),
-                _ => return term,
-            }
-        }
-        // If the term is a variable, we try to reduce it.
-        Expr::Variable(hole) => match hole.data() {
-            Some(value) => return whnf(value, state),
-            None => kind.clone(),
-        },
-        _ => kind.clone(),
-    };
-    state.intern((new_kind, *span))
-}
-
-/// Unifies two terms. It's the main point of the equation.
-///
-/// The logic relies here.
-pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), TypeError> {
-    match (&state.get(term).0, &state.get(another).0) {
-        // Errors are sentinel values, so they are threated like holes
-        // and they are ignored, anything unifies with them.
-        (Expr::Error, _) => {}
-        (_, Expr::Error) => {}
-
-        // If they are the same, they unify.
-        (Expr::Number(_), Expr::Number(_)) => {}
-        (Expr::Decimal(_, _), Expr::Decimal(_, _)) => {}
-
-        // If the term is a number, we try the following steps given the example:
-        //   9 = x + 6
-        //
-        // 1. We get the reverse of `+`, which is `-`.
-        // 2. We subtract `6` from both sides, to equate it,
-        //    and since the `9` is a constant, we can reduce
-        //    it to the WHNF.
-        // 3. Got the equation solved, we can unify the `x` with
-        //    the result of the subtraction.
-        //
-        //    3 = x and then x = 3
-        (Expr::Number(_), Expr::BinOp(bin_op)) => {
-            let (term, another) = reverse(bin_op, term, state);
-            unify(term, another, state)?;
-        }
-        (Expr::BinOp(bin_op), Expr::Number(_)) => {
-            let (term, another) = reverse(bin_op, another, state);
-            unify(term, another, state)?;
-        }
-
-        // If they are variables, they unify if they are the same.
-        //
-        // This check isn't inehenterly necessary, but it's a good catcher
-        // to avoid panics, because if the variables are the same, they will
-        // try to borrow the same data, and it will panic with ref cells.
-        (Expr::Variable(variable_a), Expr::Variable(variable_b))
-            if variable_a.name == variable_b.name => {}
-
-        // Unifies the variable with the term, if the variable is not bound. If
-        // it's bound, it will try to unify, if it's not unifiable, it will
-        // return an error.
-        (_, Expr::Variable(variable)) => {
-            match variable.data() {
-                // If the variable is already bound, we unify the bound
-                Some(bound) => {
-                    unify(term, bound, state)?;
-                }
-                // Empty hole
-                None => {
-                    variable.data.replace(Some(term));
+                    // Empty hole
+                    None => {
+                        variable.data.replace(Some(self));
+                    }
                 }
             }
-        }
-        (Expr::Variable(variable), _) => {
-            match variable.data() {
-                // If the variable is already bound, we unify the bound
-                Some(bound) => {
-                    unify(term, bound, state)?;
+            (Expr::Variable(variable), _) => {
+                match variable.data() {
+                    // If the variable is already bound, we unify the bound
+                    Some(bound) => {
+                        self.unify(bound, state)?;
+                    }
+                    // Empty hole
+                    None => {
+                        variable.data.replace(Some(another));
+                    }
                 }
-                // Empty hole
-                None => {
-                    variable.data.replace(Some(another));
+            }
+
+            // Unifies the bin ops if they are the same, and unifies the
+            // operands.
+            (Expr::BinOp(bin_op_a), Expr::BinOp(bin_op_b)) => {
+                if bin_op_a.op == bin_op_b.op {
+                    let lhs_a = bin_op_a.lhs.whnf(state);
+                    let rhs_a = bin_op_a.rhs.whnf(state);
+
+                    let lhs_b = bin_op_b.lhs.whnf(state);
+                    let rhs_b = bin_op_b.rhs.whnf(state);
+
+                    lhs_a.unify(lhs_b, state)?;
+                    rhs_a.unify(rhs_b, state)?;
+                } else {
+                    return Err(TypeError::IncompatibleOp(bin_op_a.op, bin_op_b.op));
                 }
+            }
+
+            // Reduce groups to the normal form
+            (_, Expr::Group(another)) => {
+                let term = self.whnf(state);
+                let another = another.whnf(state);
+
+                term.unify(another, state)?;
+            }
+            (Expr::Group(term), _) => {
+                let term = term.whnf(state);
+                let another = another.whnf(state);
+
+                term.unify(another, state)?;
+            }
+
+            // If they aren't compatible, return an error.
+            (kind_a, kind_b) => {
+                return Err(TypeError::NotUnifiable(kind_a.clone(), kind_b.clone()))
             }
         }
 
-        // Unifies the bin ops if they are the same, and unifies the
-        // operands.
-        (Expr::BinOp(bin_op_a), Expr::BinOp(bin_op_b)) => {
-            if bin_op_a.op == bin_op_b.op {
-                let lhs_a = whnf(bin_op_a.lhs, state);
-                let rhs_a = whnf(bin_op_a.rhs, state);
-
-                let lhs_b = whnf(bin_op_b.lhs, state);
-                let rhs_b = whnf(bin_op_b.rhs, state);
-
-                unify(lhs_a, lhs_b, state)?;
-                unify(rhs_a, rhs_b, state)?;
-            } else {
-                return Err(TypeError::IncompatibleOp(bin_op_a.op, bin_op_b.op));
-            }
-        }
-
-        // Reduce groups to the normal form
-        (_, Expr::Group(another)) => {
-            let term = whnf(term, state);
-            let another = whnf(*another, state);
-
-            unify(term, another, state)?;
-        }
-        (Expr::Group(term), _) => {
-            let term = whnf(*term, state);
-            let another = whnf(another, state);
-
-            unify(term, another, state)?;
-        }
-
-        // If they aren't compatible, return an error.
-        (kind_a, kind_b) => return Err(TypeError::NotUnifiable(kind_a.clone(), kind_b.clone())),
+        Ok(())
     }
-
-    Ok(())
 }
 
 fn main() {
     let mut state = TermArena::default();
     let (equation, _) = parse("10 = (x + 3) + 2", &mut state);
-    print!("Input: {:?}", equation.rhs.debug(&state));
+    print!("Input: {:?}", equation.lhs.debug(&state));
     print!(" = ");
     println!("{:?}", equation.rhs.debug(&state));
 
-    let lhs = whnf(equation.lhs, &mut state);
-    let rhs = whnf(equation.rhs, &mut state);
-    unify(lhs, rhs, &mut state).unwrap();
+    let lhs = equation.lhs.whnf(&mut state);
+    let rhs = equation.rhs.whnf(&mut state);
+    lhs.unify(rhs, &mut state).unwrap();
 
     let resolutions = state
         .resolutions()
