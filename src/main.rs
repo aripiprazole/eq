@@ -73,16 +73,8 @@ pub fn reverse(bin_op: &BinOp, value: Term, state: &mut TermArena) -> (Term, Ter
         }),
         span,
     ));
-    let rhs = state.intern((
-        Expr::BinOp(BinOp {
-            op: reverse_op,
-            lhs: bin_op.rhs,
-            rhs: bin_op.lhs,
-        }),
-        span,
-    ));
 
-    (lhs, rhs)
+    (lhs.whnf(state), bin_op.lhs.whnf(state))
 }
 
 /// A function. This is a function that takes arguments.
@@ -738,10 +730,12 @@ impl Term {
             //    3 = x and then x = 3
             (Expr::Number(_), Expr::BinOp(bin_op)) => {
                 let (term, another) = reverse(bin_op, self, state);
+
                 term.unify(another, state)?;
             }
             (Expr::BinOp(bin_op), Expr::Number(_)) => {
                 let (term, another) = reverse(bin_op, another, state);
+
                 term.unify(another, state)?;
             }
 
@@ -772,7 +766,7 @@ impl Term {
                 match variable.data() {
                     // If the variable is already bound, we unify the bound
                     Some(bound) => {
-                        self.unify(bound, state)?;
+                        bound.unify(another, state)?;
                     }
                     // Empty hole
                     None => {
@@ -824,7 +818,7 @@ impl Term {
 
 fn main() {
     let mut state = TermArena::default();
-    let (equation, _) = parse("10 = (x + 3) + 2", &mut state);
+    let (equation, _) = parse("10 = x + 7", &mut state);
     print!("Input: {:?}", equation.lhs.debug(&state));
     print!(" = ");
     println!("{:?}", equation.rhs.debug(&state));
