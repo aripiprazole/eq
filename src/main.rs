@@ -17,8 +17,6 @@ use chumsky::{
     span::SimpleSpan,
     text, IterParser, Parser,
 };
-use fxhash::FxBuildHasher;
-use im_rc::HashSet;
 
 /// The token type used by the lexer.
 #[derive(Debug, PartialEq, Clone)]
@@ -50,7 +48,7 @@ pub enum Op {
 }
 
 /// A binary operation. This is a binary operation that takes two arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BinOp {
     pub op: Op,
     pub lhs: Term,
@@ -83,36 +81,6 @@ impl BinOp {
         ));
 
         (lhs.rewrite(state), self.lhs.rewrite(state))
-    }
-}
-
-impl Hash for BinOp {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        match self.op {
-            // Commutative
-            //
-            // If the operator is commutative, we don't need to take the order
-            //
-            // TODO: Fixme i think it does get the order into account
-            Op::Add | Op::Mul => {
-                self.op.hash(state);
-                let mut hash_set: HashSet<Term, FxBuildHasher> = HashSet::default();
-                hash_set.insert(self.lhs);
-                hash_set.insert(self.rhs);
-                hash_set.hash(state);
-            }
-            // Non-commutative
-            //
-            // If the operator is non-commutative, we need to make sure that
-            // the order of the operands is taken into account when hashing.
-            Op::Div | Op::Sub => {
-                self.op.hash(state);
-                state.write_i8(1);
-                self.lhs.hash(state);
-                state.write_i8(2);
-                self.rhs.hash(state);
-            }
-        }
     }
 }
 
@@ -239,6 +207,11 @@ impl TermArena {
         self.id_to_slot.insert(id, Rc::new(term.clone()));
         self.slot_to_id.insert(term.0, id);
         id
+    }
+
+    /// Checks if the term exists in the arena.
+    pub fn exists(&self, term: &Expr) -> Option<Term> {
+        self.slot_to_id.get(term).cloned()
     }
 
     /// Gets the term from the arena.
@@ -404,7 +377,19 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 
                     let span = SimpleSpan::new(fst.start, snd.end);
                     let expr = Expr::BinOp(BinOp { op, lhs, rhs });
-                    state.intern((expr, span))
+
+                    // RULE: Commutativity
+                    //
+                    // The commutativity rule states that the order of the operands
+                    // does not matter. This means that `1 + 2` is the same as `2 + 1`.
+                    //
+                    // This rule is implemented by checking if the expression already
+                    // exists in the state. If it does, then we return the existing
+                    // expression, otherwise we create a new one.
+                    match state.exists(&Expr::BinOp(BinOp { op, lhs: rhs, rhs: lhs })) {
+                        Some(term) => term,
+                        None => state.intern((expr, span)),
+                    }
                 },
             )
             .labelled("factor");
