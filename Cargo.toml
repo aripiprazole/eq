@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 chumsky = {version = "1.0.0-alpha.4", features = ["label"]}
 ariadne = "0.3.0"
+slotmap = "1.0.6"
+fxhash = "0.2.1"

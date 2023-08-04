@@ -1,11 +1,10 @@
-use std::{cell::RefCell, fmt::Display, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, fmt::Display, hash::Hash, ops::Range, rc::Rc};
 
 use ariadne::{Color, Label, Report, ReportKind, Source};
 use chumsky::{
     extra::{self, Err},
     prelude::{Input, Rich},
     primitive::{just, one_of},
-    recovery::{nested_delimiters, via_parser},
     recursive::recursive,
     select,
     span::SimpleSpan,
@@ -33,7 +32,7 @@ impl<'src> Display for Token<'src> {
 }
 
 /// An operator. This is a binary operation that takes two arguments.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Op {
     Add,
     Sub,
@@ -42,42 +41,133 @@ pub enum Op {
 }
 
 /// A binary operation. This is a binary operation that takes two arguments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct BinOp {
     pub op: Op,
-    pub lhs: Box<Spanned<Term>>,
-    pub rhs: Box<Spanned<Term>>,
+    pub lhs: Term,
+    pub rhs: Term,
 }
 
 /// A function. This is a function that takes arguments.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Function {
-    Pow {
-        base: Box<Spanned<Term>>,
-        exp: Box<Spanned<Term>>,
-    },
-    Sqrt(Box<Spanned<Term>>),
-    Cbrt(Box<Spanned<Term>>),
-    Factorial(Box<Spanned<Term>>),
+    Pow { base: Term, exp: Term },
+    Sqrt(Term),
+    Cbrt(Term),
+    Factorial(Term),
 }
 
 /// A variable. This is a variable that can be assigned to.
 #[derive(Default, Debug, Clone)]
 pub struct Variable {
-    pub data: Rc<RefCell<Term>>,
+    pub name: String,
+    pub data: Rc<RefCell<Option<Term>>>,
+}
+
+impl Variable {
+    /// Gets the data of the variable.
+    pub fn data(&self) -> Option<Term> {
+        self.data.borrow().clone()
+    }
+}
+
+impl PartialEq for Variable {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Eq for Variable {}
+
+impl Hash for Variable {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
 }
 
 /// A term in the calculator. This is the lowest level of the calculator.
-#[derive(Default, Debug, Clone)]
-pub enum Term {
+#[derive(Default, Debug, Clone, Hash, PartialEq, Eq)]
+pub enum TermKind {
     #[default]
     Error,
     Number(usize),
     Decimal(usize, usize),
-    Group(Box<Spanned<Term>>),
-    Variable(String, Variable),
+    Group(Term),
+    Variable(Variable),
     BinOp(BinOp),
     Apply(Function),
+}
+
+/// Shows a term in a human-readable format.
+pub fn show(term: Term, fuel: usize, state: &mut TermArena) -> String {
+    if fuel == 0 {
+        return "…".into();
+    }
+
+    match &state.get(term).0 {
+        TermKind::Error => "error".into(),
+        TermKind::Number(n) => format!("{n}"),
+        TermKind::Decimal(n, decimal) => format!("{n}.{decimal}"),
+        TermKind::Group(group) => format!("({})", show(*group, fuel - 1, state)),
+        TermKind::Variable(variable) => match variable.data() {
+            Some(value) => format!("{}", show(value, fuel - 1, state)),
+            None => format!("?{}", variable.name),
+        },
+        TermKind::BinOp(bin_op) => {
+            let lhs = show(bin_op.lhs, fuel - 1, state);
+            let rhs = show(bin_op.rhs, fuel - 1, state);
+            let op_str = match bin_op.op {
+                Op::Add => "+",
+                Op::Sub => "-",
+                Op::Mul => "*",
+                Op::Div => "/",
+            };
+
+            format!("{lhs} {op_str} {rhs}")
+        }
+        TermKind::Apply(_) => todo!(),
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub struct Term(usize);
+
+#[derive(Default)]
+pub struct TermArena {
+    pub id_to_slot: HashMap<Term, Rc<Spanned<TermKind>>>,
+    pub slot_to_id: HashMap<TermKind, Term>,
+}
+
+impl TermArena {
+    /// Creates a new term in the arena
+    pub fn insert(&mut self, term: Spanned<TermKind>) -> Term {
+        let id = Term(fxhash::hash(&term.0));
+        self.id_to_slot.insert(id, Rc::new(term.clone()));
+        self.slot_to_id.insert(term.0, id);
+        id
+    }
+
+    /// Gets the term from the arena.
+    pub fn get(&self, id: Term) -> Rc<Spanned<TermKind>> {
+        self.id_to_slot
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| Rc::new((TermKind::Error, Range::<usize>::default().into())))
+    }
+
+    /// Gets the term from the arena.
+    pub fn resolutions(&self) -> Vec<(String, Term)> {
+        self.id_to_slot
+            .iter()
+            .filter_map(|(_, slot)| {
+                if let TermKind::Variable(variable) = &slot.0 {
+                    variable.data().map(|value| (variable.name.clone(), value))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    }
 }
 
 /// The kind of equation. This is used to determine the kind of comparison to perform.
@@ -93,8 +183,8 @@ pub enum EqKind {
 #[derive(Debug, Clone)]
 pub struct Equation {
     pub kind: EqKind,
-    pub lhs: Spanned<Term>,
-    pub rhs: Spanned<Term>,
+    pub lhs: Term,
+    pub rhs: Term,
 }
 
 //// The span type used by the parser.
@@ -125,15 +215,15 @@ fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, Lexer
             let decimal: Option<(char, &str)> = decimal;
 
             let Ok(int) = int.parse::<usize>() else {
-                return Err(Rich::custom(span, "invalid integer"));
-            };
+                    return Err(Rich::custom(span, "invalid integer"));
+                };
             let Some((_, decimal)) = decimal else {
-                return Ok(Token::Number(int));
-            };
+                    return Ok(Token::Number(int));
+                };
 
             let Ok(decimal) = decimal.parse::<usize>() else {
-                return Err(Rich::custom(span, "invalid decimal"));
-            };
+                    return Err(Rich::custom(span, "invalid decimal"));
+                };
 
             Ok(Token::Decimal(int, decimal))
         })
@@ -172,7 +262,7 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
     'tokens,
     ParserInput<'tokens, 'src>,
     Spanned<Equation>,
-    extra::Err<Rich<'tokens, Token<'src>, Span>>,
+    extra::Full<Rich<'tokens, Token<'src>, Span>, TermArena, ()>,
 > {
     // Defines the parser for the expression. It is recursive, because
     // it can be nested.
@@ -180,87 +270,91 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
         // Defines the parser for the value. It is the base of the
         // expression parser.
         let value = select! {
-            Token::Number(number) => Term::Number(number),
-            Token::Decimal(int, decimal) => Term::Decimal(int, decimal),
-            Token::Identifier(identifier) => Term::Variable(identifier.into(), Variable::default()),
-        }
-        .labelled("value");
+                Token::Number(number) => TermKind::Number(number),
+                Token::Decimal(int, decimal) => TermKind::Decimal(int, decimal),
+                Token::Identifier(identifier) => TermKind::Variable(Variable { name: identifier.into(), data: Rc::default() }),
+            }
+            .map_with_span(|kind, span| (kind, span))
+            .map_with_state(|term, _, state: &mut TermArena| state.insert(term))
+            .labelled("value");
+
+        let brackets = expr
+            .clone()
+            .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
+            .map(TermKind::Group)
+            .map_with_span(|expr, span| (expr, span))
+            .map_with_state(|term, _, state: &mut TermArena| state.insert(term));
+
+        let parenthesis = expr
+            .clone()
+            .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
+            .map(TermKind::Group)
+            .map_with_span(|expr, span| (expr, span))
+            .map_with_state(|term, _, state: &mut TermArena| state.insert(term));
+
+        let braces = expr
+            .clone()
+            .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
+            .map(TermKind::Group)
+            .map_with_span(|expr, span| (expr, span))
+            .map_with_state(|term, _, state: &mut TermArena| state.insert(term));
 
         // Defines the parser for the primary expression. It is the
         // base of the expression parser.
         let primary = value
-            .or(expr
-                .clone()
-                .delimited_by(just(Token::Ctrl('(')), just(Token::Ctrl(')')))
-                .map(|expr| Term::Group(Box::new(expr))))
-            .or(expr
-                .clone()
-                .delimited_by(just(Token::Ctrl('[')), just(Token::Ctrl(']')))
-                .boxed()
-                .map(|expr| Term::Group(Box::new(expr))))
-            .or(expr
-                .clone()
-                .delimited_by(just(Token::Ctrl('{')), just(Token::Ctrl('}')))
-                .boxed()
-                .map(|expr| Term::Group(Box::new(expr))))
-            .map_with_span(|expr, span| (expr, span))
-            .recover_with(via_parser(nested_delimiters(
-                Token::Ctrl('('),
-                Token::Ctrl(')'),
-                [
-                    (Token::Ctrl('['), Token::Ctrl(']')),
-                    (Token::Ctrl('{'), Token::Ctrl('}')),
-                ],
-                |span| (Term::Error, span),
-            )))
+            .or(braces)
+            .or(parenthesis)
+            .or(brackets)
             .labelled("primary");
 
         let factor = primary
             .clone()
             .then(just(Token::Identifier("!")).or_not())
-            .map(|(expr, not)| match not {
-                Some(_) => Term::Apply(Function::Factorial(expr.into())),
-                None => expr.0,
+            .map_with_state(|(expr, not), span, state: &mut TermArena| match not {
+                Some(_) => {
+                    let function = Function::Factorial(expr);
+                    let kind = TermKind::Apply(function);
+
+                    state.insert((kind, span))
+                }
+                None => expr,
             })
-            .map_with_span(|expr, span| (expr, span))
             .labelled("factor");
 
         let add = factor
             .clone()
-            .foldl(
+            .foldl_with_state(
                 just(Token::Identifier("+"))
                     .to(Op::Add)
                     .or(just(Token::Identifier("-")).to(Op::Sub))
                     .then(expr.clone())
                     .repeated(),
-                |lhs: Spanned<Term>, (op, rhs)| {
-                    let span = SimpleSpan::new(lhs.1.start, rhs.1.end);
-                    let expr = Term::BinOp(BinOp {
-                        op,
-                        lhs: lhs.into(),
-                        rhs: rhs.into(),
-                    });
-                    (expr, span)
+                |lhs: Term, (op, rhs), state: &mut TermArena| {
+                    let (_, fst) = &*state.get(lhs);
+                    let (_, snd) = &*state.get(rhs);
+
+                    let span = SimpleSpan::new(fst.start, snd.end);
+                    let expr = TermKind::BinOp(BinOp { op, lhs, rhs });
+                    state.insert((expr, span))
                 },
             )
             .labelled("add");
 
         let mul = add
             .clone()
-            .foldl(
+            .foldl_with_state(
                 just(Token::Identifier("*"))
                     .to(Op::Mul)
                     .or(just(Token::Identifier("/")).to(Op::Div))
                     .then(expr.clone())
                     .repeated(),
-                |lhs: Spanned<Term>, (op, rhs)| {
-                    let span = SimpleSpan::new(lhs.1.start, rhs.1.end);
-                    let expr = Term::BinOp(BinOp {
-                        op,
-                        lhs: lhs.into(),
-                        rhs: rhs.into(),
-                    });
-                    (expr, span)
+                |lhs: Term, (op, rhs), state: &mut TermArena| {
+                    let (_, fst) = &*state.get(lhs);
+                    let (_, snd) = &*state.get(rhs);
+
+                    let span = SimpleSpan::new(fst.start, snd.end);
+                    let expr = TermKind::BinOp(BinOp { op, lhs, rhs });
+                    state.insert((expr, span))
                 },
             )
             .labelled("mul");
@@ -286,7 +380,7 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 /// Parses a string into an [`Equation`].
 ///
 /// [`Equation`]: [`Equation`]
-fn parse(s: &str) -> Spanned<Equation> {
+fn parse(s: &str, state: &mut TermArena) -> Spanned<Equation> {
     type AriadneSpan = (String, std::ops::Range<usize>);
 
     // Defines the filename of the source. And it is used to
@@ -295,8 +389,9 @@ fn parse(s: &str) -> Spanned<Equation> {
 
     let (tokens, lex_errors) = lexer().parse(s).into_output_errors();
     let tokens = tokens.unwrap_or_default();
+    let tokens = tokens.as_slice().spanned((s.len()..s.len()).into());
     let (expr, errors) = parser()
-        .parse(tokens.as_slice().spanned((s.len()..s.len()).into()))
+        .parse_with_state(tokens, state)
         .into_output_errors();
 
     // If there are no errors, return the parsed expression.
@@ -335,18 +430,114 @@ fn parse(s: &str) -> Spanned<Equation> {
         let span: Span = (s.len()..s.len()).into();
         let equation = Equation {
             kind: EqKind::Eq,
-            lhs: (Term::Error, span),
-            rhs: (Term::Error, span),
+            lhs: state.insert((TermKind::Error, span)),
+            rhs: state.insert((TermKind::Error, span)),
         };
         (equation, span)
     })
 }
 
+/// The type of the error that can be returned by the unification
+#[derive(Debug, Clone)]
+pub enum TypeError {
+    /// The two terms are not unifiable.
+    NotUnifiable,
+
+    /// The two terms are not compatible.
+    IncompatibleOp(Op, Op),
+}
+
 /// Unifies two terms. It's the main point of the equation.
 ///
 /// The logic relies here.
-pub fn unify(term: Term, another: Term) {}
+pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), TypeError> {
+    match (&state.get(term).0, &state.get(another).0) {
+        // Errors are sentinel values, so they are threated like holes
+        // and they are ignored, anything unifies with them.
+        (TermKind::Error, _) => {}
+        (_, TermKind::Error) => {}
+
+        // If they are the same, they unify.
+        (TermKind::Number(_), TermKind::Number(_)) => {}
+        (TermKind::Decimal(_, _), TermKind::Decimal(_, _)) => {}
+
+        // If they are variables, they unify if they are the same.
+        //
+        // This check isn't inehenterly necessary, but it's a good catcher
+        // to avoid panics, because if the variables are the same, they will
+        // try to borrow the same data, and it will panic with ref cells.
+        (TermKind::Variable(variable_a), TermKind::Variable(variable_b))
+            if variable_a.name == variable_b.name => {}
+
+        // Unifies the variable with the term, if the variable is not bound. If
+        // it's bound, it will try to unify, if it's not unifiable, it will
+        // return an error.
+        (_, TermKind::Variable(variable)) => {
+            match variable.data() {
+                // If the variable is already bound, we unify the bound
+                Some(bound) => {
+                    unify(term, bound, state)?;
+                }
+                // Empty hole
+                None => {
+                    variable.data.replace(Some(term));
+                }
+            }
+        }
+        (TermKind::Variable(variable), _) => {
+            match variable.data() {
+                // If the variable is already bound, we unify the bound
+                Some(bound) => {
+                    unify(term, bound, state)?;
+                }
+                // Empty hole
+                None => {
+                    variable.data.replace(Some(another));
+                }
+            }
+        }
+
+        // Unifies the bin ops if they are the same, and unifies the
+        // operands.
+        (TermKind::BinOp(bin_op_a), TermKind::BinOp(bin_op_b)) => {
+            if bin_op_a.op == bin_op_b.op {
+                unify(bin_op_a.lhs, bin_op_b.lhs, state)?;
+                unify(bin_op_a.rhs, bin_op_b.rhs, state)?;
+            } else {
+                return Err(TypeError::IncompatibleOp(bin_op_a.op, bin_op_b.op));
+            }
+        }
+
+        // Reduce groups to the normal form
+        (_, TermKind::Group(another)) => {
+            unify(term, *another, state)?;
+        }
+        (TermKind::Group(term), _) => {
+            unify(*term, another, state)?;
+        }
+
+        // If they aren't compatible, return an error.
+        (_, _) => return Err(TypeError::NotUnifiable),
+    }
+
+    Ok(())
+}
 
 fn main() {
-    println!("{:?}", parse("1 + 2 * 3 = x"));
+    let mut state = TermArena::default();
+    let (equation, _) = parse("3 + 3 = x + 3", &mut state);
+    unify(equation.lhs, equation.rhs, &mut state).unwrap();
+
+    let resolutions = state
+        .resolutions()
+        .into_iter()
+        .map(|(incognito, term)| {
+            let term = show(term, 256, &mut state);
+
+            format!("{incognito} = {term}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    println!("{resolutions}");
 }
