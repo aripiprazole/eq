@@ -659,11 +659,7 @@ impl Term {
 
     /// Reduces a term to its weak head normal form.
     pub fn whnf(self, state: &mut TermArena) -> Term {
-        let term = self
-            .apply_distributive_property(state)
-            .apply_associativity(state);
-
-        let (kind, span) = &*state.get(term);
+        let (kind, span) = &*state.get(self);
         let new_kind = match kind {
             Expr::Group(group) => Expr::Group(group.rewrite(state)),
             Expr::BinOp(bin_op) => {
@@ -688,9 +684,9 @@ impl Term {
 
                             Expr::Number(number)
                         }
-                        Expr::Decimal(_number, _decimal) => return term,
+                        Expr::Decimal(_number, _decimal) => return self,
                         Expr::Group(group) => return group.rewrite(state),
-                        _ => return term,
+                        _ => return self,
                     },
 
                     // If the term is a decimal
@@ -698,13 +694,13 @@ impl Term {
                     // We assume that the term is a decimal and we try to
                     // reduce it.
                     Expr::Decimal(_number, _decimal) => match &state.get(rhs).0 {
-                        Expr::Number(_rhs) => return term,
-                        Expr::Decimal(_number, _decimal) => return term,
+                        Expr::Number(_rhs) => return self,
+                        Expr::Decimal(_number, _decimal) => return self,
                         Expr::Group(group) => return group.rewrite(state),
-                        _ => return term,
+                        _ => return self,
                     },
                     Expr::Group(group) => return group.rewrite(state),
-                    _ => return term,
+                    _ => return self,
                 }
             }
             // If the term is a variable, we try to reduce it.
