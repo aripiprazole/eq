@@ -441,10 +441,63 @@ fn parse(s: &str, state: &mut TermArena) -> Spanned<Equation> {
 #[derive(Debug, Clone)]
 pub enum TypeError {
     /// The two terms are not unifiable.
-    NotUnifiable,
+    NotUnifiable(TermKind, TermKind),
 
     /// The two terms are not compatible.
     IncompatibleOp(Op, Op),
+}
+
+/// Reduces a term to its weak head normal form.
+pub fn whnf(term: Term, state: &mut TermArena) -> Term {
+    let (kind, span) = &*state.get(term);
+    let new_kind = match kind {
+        TermKind::Group(group) => TermKind::Group(whnf(*group, state)),
+        TermKind::BinOp(bin_op) => {
+            let lhs = whnf(bin_op.lhs, state);
+            let rhs = whnf(bin_op.rhs, state);
+
+            // If the term is a number, we try to reduce it evaluating
+            // the operation.
+            match &state.get(lhs).0 {
+                // If the term is a number
+                // 
+                // We assume that the term is a number and we try to
+                // reduce it.
+                TermKind::Number(lhs) => match &state.get(rhs).0 {
+                    TermKind::Number(rhs) => {
+                        let number = match bin_op.op {
+                            Op::Add => lhs + rhs,
+                            Op::Sub => lhs - rhs,
+                            Op::Mul => lhs * rhs,
+                            Op::Div => lhs / rhs,
+                        };
+
+                        TermKind::Number(number)
+                    }
+                    TermKind::Decimal(_number, _decimal) => return term,
+                    _ => return term,
+                },
+
+                // If the term is a decimal
+                // 
+                // We assume that the term is a decimal and we try to
+                // reduce it.
+                TermKind::Decimal(_number, _decimal) => match &state.get(rhs).0 {
+                    TermKind::Number(_rhs) => return term,
+                    TermKind::Decimal(_number, _decimal) => return term,
+                    _ => return term,
+                },
+                _ => return term,
+            }
+        }
+        // If the term is a variable, we try to reduce it.
+        TermKind::Variable(hole) => match hole.data() {
+            Some(value) => return whnf(value, state),
+            None => kind.clone(),
+        },
+        _ => kind.clone(),
+    };
+    state.insert((new_kind, *span))
 }
 
 /// Unifies two terms. It's the main point of the equation.
@@ -501,8 +554,14 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
         // operands.
         (TermKind::BinOp(bin_op_a), TermKind::BinOp(bin_op_b)) => {
             if bin_op_a.op == bin_op_b.op {
-                unify(bin_op_a.lhs, bin_op_b.lhs, state)?;
-                unify(bin_op_a.rhs, bin_op_b.rhs, state)?;
+                let lhs_a = whnf(bin_op_a.lhs, state);
+                let rhs_a = whnf(bin_op_a.rhs, state);
+
+                let lhs_b = whnf(bin_op_b.lhs, state);
+                let rhs_b = whnf(bin_op_b.rhs, state);
+
+                unify(lhs_a, lhs_b, state)?;
+                unify(rhs_a, rhs_b, state)?;
             } else {
                 return Err(TypeError::IncompatibleOp(bin_op_a.op, bin_op_b.op));
             }
@@ -510,14 +569,20 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
 
         // Reduce groups to the normal form
         (_, TermKind::Group(another)) => {
-            unify(term, *another, state)?;
+            let term = whnf(term, state);
+            let another = whnf(*another, state);
+
+            unify(term, another, state)?;
         }
         (TermKind::Group(term), _) => {
-            unify(*term, another, state)?;
+            let term = whnf(*term, state);
+            let another = whnf(another, state);
+
+            unify(term, another, state)?;
         }
 
         // If they aren't compatible, return an error.
-        (_, _) => return Err(TypeError::NotUnifiable),
+        (kind_a, kind_b) => return Err(TypeError::NotUnifiable(kind_a.clone(), kind_b.clone())),
     }
 
     Ok(())
@@ -525,8 +590,10 @@ pub fn unify(term: Term, another: Term, state: &mut TermArena) -> Result<(), Typ
 
 fn main() {
     let mut state = TermArena::default();
-    let (equation, _) = parse("3 + 3 = x + 3", &mut state);
-    unify(equation.lhs, equation.rhs, &mut state).unwrap();
+    let (equation, _) = parse("3 * 3 = x + 6", &mut state);
+    let lhs = whnf(equation.lhs, &mut state);
+    let rhs = whnf(equation.rhs, &mut state);
+    unify(lhs, rhs, &mut state).unwrap();
 
     let resolutions = state
         .resolutions()
