@@ -55,26 +55,33 @@ pub struct BinOp {
     pub rhs: Term,
 }
 
-pub fn reverse(bin_op: &BinOp, value: Term, state: &mut TermArena) -> (Term, Term) {
-    let reverse_op = match bin_op.op {
-        Op::Add => Op::Sub,
-        Op::Sub => Op::Add,
-        Op::Mul => Op::Div,
-        Op::Div => Op::Mul,
-    };
+impl BinOp {
+    /// RULE: Symmetry
+    ///
+    /// Examples:
+    /// `a + b = b + a`
+    /// `a - b = b - a`
+    pub fn symmetry(&self, value: Term, state: &mut TermArena) -> (Term, Term) {
+        let reverse_op = match self.op {
+            Op::Add => Op::Sub,
+            Op::Sub => Op::Add,
+            Op::Mul => Op::Div,
+            Op::Div => Op::Mul,
+        };
 
-    let span: Span = (state.get(bin_op.lhs).1.start..state.get(bin_op.rhs).1.end).into();
+        let span: Span = (state.get(self.lhs).1.start..state.get(self.rhs).1.end).into();
 
-    let lhs = state.intern((
-        Expr::BinOp(BinOp {
-            op: reverse_op,
-            lhs: value,
-            rhs: bin_op.rhs,
-        }),
-        span,
-    ));
+        let lhs = state.intern((
+            Expr::BinOp(BinOp {
+                op: reverse_op,
+                lhs: value,
+                rhs: self.rhs,
+            }),
+            span,
+        ));
 
-    (lhs.whnf(state), bin_op.lhs.whnf(state))
+        (lhs.whnf(state), self.lhs.whnf(state))
+    }
 }
 
 /// A function. This is a function that takes arguments.
@@ -729,12 +736,12 @@ impl Term {
             //
             //    3 = x and then x = 3
             (Expr::Number(_), Expr::BinOp(bin_op)) => {
-                let (term, another) = reverse(bin_op, self, state);
+                let (term, another) = bin_op.symmetry(self, state);
 
                 term.unify(another, state)?;
             }
             (Expr::BinOp(bin_op), Expr::Number(_)) => {
-                let (term, another) = reverse(bin_op, another, state);
+                let (term, another) = bin_op.symmetry(another, state);
 
                 term.unify(another, state)?;
             }
