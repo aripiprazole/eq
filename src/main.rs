@@ -17,6 +17,8 @@ use chumsky::{
     span::SimpleSpan,
     text, IterParser, Parser,
 };
+use fxhash::FxBuildHasher;
+use im_rc::HashSet;
 
 /// The token type used by the lexer.
 #[derive(Debug, PartialEq, Clone)]
@@ -48,7 +50,7 @@ pub enum Op {
 }
 
 /// A binary operation. This is a binary operation that takes two arguments.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinOp {
     pub op: Op,
     pub lhs: Term,
@@ -81,6 +83,36 @@ impl BinOp {
         ));
 
         (lhs.rewrite(state), self.lhs.rewrite(state))
+    }
+}
+
+impl Hash for BinOp {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self.op {
+            // Commutative
+            //
+            // If the operator is commutative, we don't need to take the order
+            //
+            // TODO: Fixme i think it does get the order into account
+            Op::Add | Op::Mul => {
+                self.op.hash(state);
+                let mut hash_set: HashSet<Term, FxBuildHasher> = HashSet::default();
+                hash_set.insert(self.lhs);
+                hash_set.insert(self.rhs);
+                hash_set.hash(state);
+            }
+            // Non-commutative
+            //
+            // If the operator is non-commutative, we need to make sure that
+            // the order of the operands is taken into account when hashing.
+            Op::Div | Op::Sub => {
+                self.op.hash(state);
+                state.write_i8(1);
+                self.lhs.hash(state);
+                state.write_i8(2);
+                self.rhs.hash(state);
+            }
+        }
     }
 }
 
