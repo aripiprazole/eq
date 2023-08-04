@@ -80,7 +80,7 @@ impl BinOp {
             span,
         ));
 
-        (lhs.whnf(state), self.lhs.whnf(state))
+        (lhs.rewrite(state), self.lhs.rewrite(state))
     }
 }
 
@@ -534,9 +534,9 @@ fn associate(lhs: Term, fop: Op, mhs: Term, sop: Op, rhs: Term, state: &mut Term
     // Evaluate the operation if the precedence of the
     // operator is higher than the precedence of the
     // operator of the right hand side.
-    let lhs = lhs.apply_associativity(state).whnf(state);
-    let mhs = mhs.apply_associativity(state).whnf(state);
-    let rhs = rhs.apply_associativity(state).whnf(state);
+    let lhs = lhs.apply_associativity(state).rewrite(state);
+    let mhs = mhs.apply_associativity(state).rewrite(state);
+    let rhs = rhs.apply_associativity(state).rewrite(state);
 
     // If the precedence of the operator of the left hand side
     // is higher than the precedence of the operator of the
@@ -650,6 +650,13 @@ impl Term {
         state.intern((Expr::BinOp(bin_op), *span))
     }
 
+    /// Rewrites a term to its normal form.
+    pub fn rewrite(self, state: &mut TermArena) -> Term {
+        self.apply_distributive_property(state)
+            .apply_associativity(state)
+            .whnf(state)
+    }
+
     /// Reduces a term to its weak head normal form.
     pub fn whnf(self, state: &mut TermArena) -> Term {
         let term = self
@@ -658,10 +665,10 @@ impl Term {
 
         let (kind, span) = &*state.get(term);
         let new_kind = match kind {
-            Expr::Group(group) => Expr::Group(group.whnf(state)),
+            Expr::Group(group) => Expr::Group(group.rewrite(state)),
             Expr::BinOp(bin_op) => {
-                let lhs = bin_op.lhs.whnf(state);
-                let rhs = bin_op.rhs.whnf(state);
+                let lhs = bin_op.lhs.rewrite(state);
+                let rhs = bin_op.rhs.rewrite(state);
 
                 // If the term is a number, we try to reduce it evaluating
                 // the operation.
@@ -682,7 +689,7 @@ impl Term {
                             Expr::Number(number)
                         }
                         Expr::Decimal(_number, _decimal) => return term,
-                        Expr::Group(group) => return group.whnf(state),
+                        Expr::Group(group) => return group.rewrite(state),
                         _ => return term,
                     },
 
@@ -693,16 +700,16 @@ impl Term {
                     Expr::Decimal(_number, _decimal) => match &state.get(rhs).0 {
                         Expr::Number(_rhs) => return term,
                         Expr::Decimal(_number, _decimal) => return term,
-                        Expr::Group(group) => return group.whnf(state),
+                        Expr::Group(group) => return group.rewrite(state),
                         _ => return term,
                     },
-                    Expr::Group(group) => return group.whnf(state),
+                    Expr::Group(group) => return group.rewrite(state),
                     _ => return term,
                 }
             }
             // If the term is a variable, we try to reduce it.
             Expr::Variable(hole) => match hole.data() {
-                Some(value) => return value.whnf(state),
+                Some(value) => return value.rewrite(state),
                 None => kind.clone(),
             },
             _ => kind.clone(),
@@ -786,11 +793,11 @@ impl Term {
             // operands.
             (Expr::BinOp(bin_op_a), Expr::BinOp(bin_op_b)) => {
                 if bin_op_a.op == bin_op_b.op {
-                    let lhs_a = bin_op_a.lhs.whnf(state);
-                    let rhs_a = bin_op_a.rhs.whnf(state);
+                    let lhs_a = bin_op_a.lhs.rewrite(state);
+                    let rhs_a = bin_op_a.rhs.rewrite(state);
 
-                    let lhs_b = bin_op_b.lhs.whnf(state);
-                    let rhs_b = bin_op_b.rhs.whnf(state);
+                    let lhs_b = bin_op_b.lhs.rewrite(state);
+                    let rhs_b = bin_op_b.rhs.rewrite(state);
 
                     lhs_a.unify(lhs_b, state)?;
                     rhs_a.unify(rhs_b, state)?;
@@ -801,14 +808,14 @@ impl Term {
 
             // Reduce groups to the normal form
             (_, Expr::Group(another)) => {
-                let term = self.whnf(state);
-                let another = another.whnf(state);
+                let term = self.rewrite(state);
+                let another = another.rewrite(state);
 
                 term.unify(another, state)?;
             }
             (Expr::Group(term), _) => {
-                let term = term.whnf(state);
-                let another = another.whnf(state);
+                let term = term.rewrite(state);
+                let another = another.rewrite(state);
 
                 term.unify(another, state)?;
             }
@@ -830,8 +837,8 @@ fn main() {
     print!(" = ");
     println!("{:?}", equation.rhs.debug(&state));
 
-    let lhs = equation.lhs.whnf(&mut state);
-    let rhs = equation.rhs.whnf(&mut state);
+    let lhs = equation.lhs.rewrite(&mut state);
+    let rhs = equation.rhs.rewrite(&mut state);
     lhs.unify(rhs, &mut state).unwrap();
 
     let resolutions = state
