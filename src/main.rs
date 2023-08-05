@@ -282,15 +282,15 @@ fn lexer<'src>() -> impl Parser<'src, &'src str, Vec<(Token<'src>, Span)>, Lexer
             let decimal: Option<(char, &str)> = decimal;
 
             let Ok(int) = int.parse::<usize>() else {
-                    return Err(Rich::custom(span, "invalid integer"));
-                };
+                return Err(Rich::custom(span, "invalid integer"));
+            };
             let Some((_, decimal)) = decimal else {
-                    return Ok(Token::Number(int));
-                };
+                return Ok(Token::Number(int));
+            };
 
             let Ok(decimal) = decimal.parse::<usize>() else {
-                    return Err(Rich::custom(span, "invalid decimal"));
-                };
+                return Err(Rich::custom(span, "invalid decimal"));
+            };
 
             Ok(Token::Decimal(int, decimal))
         })
@@ -387,8 +387,9 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     // exists in the state. If it does, then we return the existing
                     // expression, otherwise we create a new one.
                     match state.exists(&Expr::BinOp(BinOp { op, lhs: rhs, rhs: lhs })) {
-                        Some(term) => term,
+                        Some(term) if op == Op::Add => term,
                         None => state.intern((expr, span)),
+                        _ => state.intern((expr, span)),
                     }
                 },
             )
@@ -407,7 +408,20 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
 
                     let span = SimpleSpan::new(fst.start, snd.end);
                     let expr = Expr::BinOp(BinOp { op, lhs, rhs });
-                    state.intern((expr, span))
+
+                    // RULE: Commutativity
+                    //
+                    // The commutativity rule states that the order of the operands
+                    // does not matter. This means that `1 + 2` is the same as `2 + 1`.
+                    //
+                    // This rule is implemented by checking if the expression already
+                    // exists in the state. If it does, then we return the existing
+                    // expression, otherwise we create a new one.
+                    match state.exists(&Expr::BinOp(BinOp { op, lhs: rhs, rhs: lhs })) {
+                        Some(term) if op == Op::Mul => term,
+                        None => state.intern((expr, span)),
+                        _ => state.intern((expr, span)),
+                    }
                 },
             )
             .labelled("term");
