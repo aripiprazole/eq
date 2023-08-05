@@ -59,8 +59,8 @@ impl BinOp {
     /// RULE: Symmetry
     ///
     /// Examples:
-    /// `a + b = b + a`
-    /// `a - b = b - a`
+    /// `a + b = c`
+    /// `a = c - b`
     pub fn symmetry(&self, value: Term, state: &mut TermArena) -> (Term, Term) {
         let reverse_op = match self.op {
             Op::Add => Op::Sub,
@@ -386,7 +386,11 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     // This rule is implemented by checking if the expression already
                     // exists in the state. If it does, then we return the existing
                     // expression, otherwise we create a new one.
-                    match state.exists(&Expr::BinOp(BinOp { op, lhs: rhs, rhs: lhs })) {
+                    match state.exists(&Expr::BinOp(BinOp {
+                        op,
+                        lhs: rhs,
+                        rhs: lhs,
+                    })) {
                         Some(term) if op == Op::Add => term,
                         None => state.intern((expr, span)),
                         _ => state.intern((expr, span)),
@@ -417,7 +421,11 @@ fn parser<'tokens, 'src: 'tokens>() -> impl Parser<
                     // This rule is implemented by checking if the expression already
                     // exists in the state. If it does, then we return the existing
                     // expression, otherwise we create a new one.
-                    match state.exists(&Expr::BinOp(BinOp { op, lhs: rhs, rhs: lhs })) {
+                    match state.exists(&Expr::BinOp(BinOp {
+                        op,
+                        lhs: rhs,
+                        rhs: lhs,
+                    })) {
                         Some(term) if op == Op::Mul => term,
                         None => state.intern((expr, span)),
                         _ => state.intern((expr, span)),
@@ -655,11 +663,11 @@ impl Term {
     pub fn rewrite(self, state: &mut TermArena) -> Term {
         self.apply_distributive_property(state)
             .apply_associativity(state)
-            .whnf(state)
+            .normalize(state)
     }
 
-    /// Reduces a term to its weak head normal form.
-    pub fn whnf(self, state: &mut TermArena) -> Term {
+    /// Reduces a term to its normal form.
+    pub fn normalize(self, state: &mut TermArena) -> Term {
         let (kind, span) = &*state.get(self);
         let new_kind = match kind {
             Expr::Group(group) => Expr::Group(group.rewrite(state)),
@@ -713,7 +721,7 @@ impl Term {
             (_, Expr::Error) => {}
 
             // If they are the same, they unify.
-            (Expr::Number(_), Expr::Number(_)) => {}
+            (Expr::Number(a), Expr::Number(b)) if a == b => {}
 
             // If the term is a number, we try the following steps given the example:
             //   9 = x + 6
@@ -802,6 +810,10 @@ impl Term {
                 let another = another.rewrite(state);
 
                 term.unify(another, state)?;
+            }
+
+            (a, b) => {
+                return Err(TypeError::NotUnifiable(a.clone(), b.clone()));
             }
         }
 

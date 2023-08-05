@@ -36,6 +36,22 @@ pub enum Expr {
 }
 ```
 
+## Sections
+
+- [Mathematical Properties](#mathematical-properties)
+- [Parser](#parser)
+  - [Parser combinators](#parser-combinators)
+  - [Lexer](#lexer)
+  - [Tree](#tree)
+  - [Parser Implementation](#parser-implementation)
+- [Reducing terms](#reducing-terms)
+- [Symmetry](#symmetry)
+- [Distributivity](#distributivity)
+- [Associativity](#associativity)
+- [Rewriting](#rewriting)
+- [Unifiying/Equating](#unifiyingequating)
+- [Final](#final)
+
 ## Mathematical Properties
 
 To write a equation solver, we need to clarify what are the mathematical properties
@@ -204,7 +220,7 @@ pub struct BinOp {
 
 The full source code can be found in the [main.rs](https://github.com/aripiprazole/eq/blob/main/src/main.rs#L117).
 
-### Real Parser
+### Parser implementation
 
 Now we need to write an expression parser, which will take translate tokens into
 mathematical terms.
@@ -267,6 +283,7 @@ impl TermArena {
     }
 }
 ```
+
 > Here it's used the library [fxhash](https://crates.io/crates/fxhash) to fast
 > hash the values
 
@@ -406,3 +423,455 @@ expr_parser
 ```
 
 Its the combination of `expr (== | !=) expr`.
+
+## Reducing terms
+
+We need to reduce the terms to it's normal form, to be compared with another
+terms, like: `1 + 2` needs to be reduced to `3` to be compared with `3` properly.
+
+It's the first rewrite rule we need to write! So let's create a function like
+`rewrite` in
+
+```rs
+impl Term {
+    /// Rewrites a term to its normal form.
+    pub fn rewrite(self, state: &mut TermArena) -> Term {
+        self.normalize(state)
+    }
+}
+```
+
+And start writing the [`normalize function`](https://wiki.haskell.org/Weak_head_normal_form).
+which is the reduced/or evaluated form.
+
+The link is appointing to the Haskell documentation.
+
+```rs
+impl Term {
+    /// Reduces a term to its normal form.
+    pub fn normalize(self, state: &mut TermArena) -> Term {
+        let (kind, span) = &*state.get(self);
+        let new_kind = match kind {
+            Expr::Group(group) => Expr::Group(group.rewrite(state)),
+            Expr::BinOp(bin_op) => {
+                let lhs = bin_op.lhs.rewrite(state);
+                let rhs = bin_op.rhs.rewrite(state);
+
+                // If the term is a number, we try to reduce it evaluating
+                // the operation.
+                match &state.get(lhs).0 {
+                    // If the term is a number
+                    //
+                    // We assume that the term is a number and we try to
+                    // reduce it.
+                    Expr::Number(lhs) => match &state.get(rhs).0 {
+                        Expr::Number(rhs) => {
+                            let number = match bin_op.op {
+                                Op::Add => lhs + rhs,
+                                Op::Sub => lhs - rhs,
+                                Op::Mul => lhs * rhs,
+                                Op::Div => lhs / rhs,
+                            };
+
+                            Expr::Number(number)
+                        }
+                        Expr::Group(group) => return group.rewrite(state),
+                        _ => return self,
+                    },
+                    Expr::Group(group) => return group.rewrite(state),
+                    _ => return self,
+                }
+            }
+            // If the term is a variable, we try to reduce it.
+            Expr::Variable(hole) => match hole.data() {
+                Some(value) => return value.rewrite(state),
+                None => kind.clone(),
+            },
+            _ => kind.clone(),
+        };
+        state.intern((new_kind, *span))
+    }
+}
+```
+
+It basically evaluates the term to it's normal form
+
+## Symmetry
+
+We need to write the symmetry rule, which will be used in a further step called
+`unifying/equating`.
+
+```rs
+impl BinOp {
+    /// RULE: Symmetry
+    ///
+    /// Examples:
+    /// `a + b = c`
+    /// `a = c - b`
+    pub fn symmetry(&self, value: Term, state: &mut TermArena) -> (Term, Term) {
+        let reverse_op = match self.op {
+            Op::Add => Op::Sub,
+            Op::Sub => Op::Add,
+            Op::Mul => Op::Div,
+            Op::Div => Op::Mul,
+        };
+
+        let span: Span = (state.get(self.lhs).1.start..state.get(self.rhs).1.end).into();
+
+        let lhs = state.intern((
+            Expr::BinOp(BinOp {
+                op: reverse_op,
+                lhs: value,
+                rhs: self.rhs,
+            }),
+            span,
+        ));
+
+        (lhs.rewrite(state), self.lhs.rewrite(state))
+    }
+}
+```
+
+The symmetry is basically, the following steps with the given [BinOp]:
+
+```
+x + 7 = 10
+x = 10 - 7
+```
+
+It's a fundamental step for solving equations!
+
+## Distributivity
+
+The distributivity property is when we apply an operation to it's left side, like
+
+```
+(x + 2) * 2
+```
+
+Which will be rewrote into:
+
+```
+2 * x + 4
+```
+
+This is fundamental to write some equations, the source code for this step is:
+
+```rs
+impl Term {
+    /// Distributes a term over another term.
+    pub fn distribute(self, op: Op, another: Term, state: &mut TermArena) -> Term {
+        let (kind, span) = &*state.get(self);
+        let new_kind = match kind {
+            Expr::Group(_) => return self,
+            Expr::BinOp(bin_op) => {
+                let lhs = bin_op.lhs.apply_distributive_property(state);
+                let rhs = bin_op.rhs.apply_distributive_property(state);
+
+                Expr::BinOp(BinOp {
+                    op: bin_op.op,
+                    lhs,
+                    rhs,
+                })
+            }
+            _ => Expr::BinOp(BinOp {
+                op,
+                lhs: self,
+                rhs: another,
+            }),
+        };
+
+        state.intern((new_kind, *span))
+    }
+
+    /// Applies the distributive property to a term.
+    pub fn apply_distributive_property(self, state: &mut TermArena) -> Term {
+        let Expr::BinOp(bin_op) = &state.get(self).0 else {
+            return self;
+        };
+
+        match (&state.get(bin_op.lhs).0, &state.get(bin_op.rhs).0) {
+            (Expr::Group(group), _) => group.distribute(bin_op.op, bin_op.rhs, state),
+            (_, Expr::Group(group)) => group.distribute(bin_op.op, bin_op.lhs, state),
+            (_, _) => self,
+        }
+    }
+}
+```
+
+## Associativity
+
+The associativity rules represents an equation that's like: (1 + 2) + 3 = 1 + (2 + 3). It does represents an reorder based in the precedence, to normalize the operation.
+
+We can write a code to associate 3 terms based on it's operator precedence:
+
+```rs
+/// Applies the associativity rule to a binary operation.
+fn associate(lhs: Term, fop: Op, mhs: Term, sop: Op, rhs: Term, state: &mut TermArena) -> BinOp {
+    // RULE: Associativity
+    //
+    // If the term is a binary operation, we try to reduce it
+    // to its weak head normal form using the precedence of
+    // the operators.
+    //
+    // This step is called precedence climbing.
+    //
+    // Evaluate the operation if the precedence of the
+    // operator is higher than the precedence of the
+    // operator of the right hand side.
+    let lhs = lhs.apply_associativity(state).rewrite(state);
+    let mhs = mhs.apply_associativity(state).rewrite(state);
+    let rhs = rhs.apply_associativity(state).rewrite(state);
+
+    // If the precedence of the operator of the left hand side
+    // is higher than the precedence of the operator of the
+    // right hand side, we change the order.
+    if op_power(sop) >= op_power(fop) {
+        BinOp {
+            op: fop,
+            lhs,
+            rhs: state.intern((
+                Expr::BinOp(BinOp {
+                    op: sop,
+                    lhs: mhs,
+                    rhs,
+                }),
+                (0..0).into(),
+            )),
+        }
+    } else {
+        BinOp {
+            op: fop,
+            lhs: state.intern((
+                Expr::BinOp(BinOp {
+                    op: sop,
+                    lhs,
+                    rhs: mhs,
+                }),
+                (0..0).into(),
+            )),
+            rhs,
+        }
+    }
+}
+```
+
+And write a wrapper in [Term] to call it with [BinOp] operations:
+
+```rs
+impl Term {
+    /// Applies the associativity rule to a term.
+    pub fn apply_associativity(self, state: &mut TermArena) -> Term {
+        let (kind, span) = &*state.get(self);
+
+        // If the term is not a binary operation, we return it.
+        let Expr::BinOp(mut bin_op) = kind.clone() else {
+            return self;
+        };
+
+        // Apply associativy to the leftmost side of the expression.
+        //
+        // This is done by recursively applying the associativity
+        if let Expr::BinOp(lhs_bin) = &state.get(bin_op.lhs).0 {
+            bin_op = associate(
+                lhs_bin.lhs,
+                lhs_bin.op,
+                lhs_bin.rhs,
+                bin_op.op,
+                bin_op.rhs,
+                state,
+            );
+        }
+
+        // Apply associativy to the rightmost side of the expression.
+        //
+        // This is done by recursively applying the associativity
+        if let Expr::BinOp(rhs_bin) = &state.get(bin_op.rhs).0 {
+            bin_op = associate(
+                bin_op.lhs,
+                bin_op.op,
+                rhs_bin.lhs,
+                rhs_bin.op,
+                rhs_bin.rhs,
+                state,
+            );
+        }
+
+        // Reintern the term.
+        state.intern((Expr::BinOp(bin_op), *span))
+    }
+}
+```
+
+## Rewriting
+
+We need to change the `rewrite` function to compute all rewrite rules we have
+made:
+
+```rs
+/// Rewrites a term to its normal form.
+pub fn rewrite(self, state: &mut TermArena) -> Term {
+    self.apply_distributive_property(state)
+        .apply_associativity(state)
+        .normalize(state)
+}
+```
+
+## Unifiying/Equating
+
+Now we need to write the logical part, which will compare the operations. We need
+to first start a pattern matching:
+
+```rs
+impl Term {
+    /// Unifies two terms. It's the main point of the equation.
+    ///
+    /// The logic relies here.
+    pub fn unify(self, another: Term, state: &mut TermArena) -> Result<(), TypeError> {
+        match (&state.get(self).0, &state.get(another).0) {
+            // Errors are sentinel values, so they are threated like holes
+            // and they are ignored, anything unifies with them.
+            (Expr::Error, _) => {}
+            (_, Expr::Error) => {}
+
+            (a, b) => {
+                return Err(TypeError::NotUnifiable(a.clone(), b.clone()));
+            }
+            // ...
+        }
+
+        Ok(())
+    }
+}
+```
+
+> The terms successfully unified will fallback ino the `Ok(())` expressions,
+> and if it's not unified, it will return an error just like in the `TypeError::NotUnifiable`
+> part
+
+And wrap the group terms, unifying its values:
+
+```rs
+// Reduce groups to the normal form
+(_, Expr::Group(another)) => {
+    let term = self.rewrite(state);
+    let another = another.rewrite(state);
+
+    term.unify(another, state)?;
+}
+(Expr::Group(term), _) => {
+    let term = term.rewrite(state);
+    let another = another.rewrite(state);
+
+    term.unify(another, state)?;
+}
+```
+
+And unify numbers, if they are the same number, it will unify properly
+
+```rs
+// If they are the same, they unify.
+(Expr::Number(a), Expr::Number(b)) if a == b => {}
+```
+
+Now, the variable stuff, which is the same as the number part, if the
+name is the same, it will unify.
+
+```rs
+
+// If they are variables, they unify if they are the same.
+//
+// This check isn't inehenterly necessary, but it's a good catcher
+// to avoid panics, because if the variables are the same, they will
+// try to borrow the same data, and it will panic with ref cells.
+(Expr::Variable(variable_a), Expr::Variable(variable_b))
+    if variable_a.name == variable_b.name => {}
+```
+
+Now we need to unify attributions, like `x = 5`, or something like this, this
+will basically give the variable, a meaning.
+
+```rs
+// Unifies the variable with the term, if the variable is not bound. If
+// it's bound, it will try to unify, if it's not unifiable, it will
+// return an error.
+(_, Expr::Variable(variable)) => {
+    match variable.data() {
+        // If the variable is already bound, we unify the bound
+        Some(bound) => {
+            self.unify(bound, state)?;
+        }
+        // Empty hole
+        None => {
+            variable.data.replace(Some(self));
+        }
+    }
+}
+(Expr::Variable(variable), _) => {
+    match variable.data() {
+        // If the variable is already bound, we unify the bound
+        Some(bound) => {
+            bound.unify(another, state)?;
+        }
+        // Empty hole
+        None => {
+            variable.data.replace(Some(another));
+        }
+    }
+}
+
+```
+
+And now, unify the operations, like `1 + 1` = `1 + 1`, we need to reduce the
+terms, like: `1 + 1` is equivalent to `2`, so we will compare `2` with `2`,
+and it will successfully unify:
+
+```rs
+// Unifies the bin ops if they are the same, and unifies the
+// operands.
+(Expr::BinOp(bin_op_a), Expr::BinOp(bin_op_b)) => {
+    if bin_op_a.op == bin_op_b.op {
+        let lhs_a = bin_op_a.lhs.rewrite(state);
+        let rhs_a = bin_op_a.rhs.rewrite(state);
+
+        let lhs_b = bin_op_b.lhs.rewrite(state);
+        let rhs_b = bin_op_b.rhs.rewrite(state);
+
+        lhs_a.unify(lhs_b, state)?;
+        rhs_a.unify(rhs_b, state)?;
+    } else {
+        return Err(TypeError::IncompatibleOp(bin_op_a.op, bin_op_b.op));
+    }
+}
+```
+
+Now, the last part, we need to unify the symmetry, if we have an example like
+the comments, it will use the `symmetry` function.
+
+```rs
+// If the term is a number, we try the following steps given the example:
+//   9 = x + 6
+//
+// 1. We get the reverse of `+`, which is `-`.
+// 2. We subtract `6` from both sides, to equate it,
+//    and since the `9` is a constant, we can reduce
+//    it to the normal form.
+// 3. Got the equation solved, we can unify the `x` with
+//    the result of the subtraction.
+//
+//    3 = x and then x = 3
+(Expr::Number(_), Expr::BinOp(bin_op)) => {
+    let (term, another) = bin_op.symmetry(self, state);
+
+    term.unify(another, state)?;
+}
+(Expr::BinOp(bin_op), Expr::Number(_)) => {
+    let (term, another) = bin_op.symmetry(another, state);
+
+    term.unify(another, state)?;
+}
+```
+
+# Final
+
+Thanks for your read :) Have a nice day!
